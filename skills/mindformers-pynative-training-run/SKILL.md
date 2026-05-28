@@ -1,269 +1,284 @@
 ---
 name: mindformers-pynative-training-run
-description: Practical playbook for launching MindFormers pynative training jobs on Ascend, observing them while they run, extracting per_step_time / loss, and recognizing common error signatures. Covers msrun command shape, log/profile directory layout, the background-run + Monitor pattern, and pitfalls like stale log content from tail -F before a fresh run truncates the file.
-when_to_use: User asks to run / kick off / launch a MindFormers training, msrun something, run a yaml in PYNATIVE_MODE; user asks for "loss curve" / "per_step_time" / "训练跑一下" / "跑训练" / "看 loss" on a MindFormers / DeepSeek-V3 yaml; user reports a training hung / crashed at step N / HCCL ret:4 / OOM / "step 200 error"; agent needs to verify a code change in muon.py or other MindFormers code by re-running training; agent needs to read worker_*.log; the conversation references dp8 / dp4tp2 / single / agd yaml variants.
+description: Walk a user from "I want to train this model" to a running MindFormers pynative job on Ascend NPUs. Covers what inputs to gather (a base yaml, card count via ASCEND_RT_VISIBLE_DEVICES, dataset, optional checkpoint), how to check + fill the yaml's data_path (sample megatron dataset download from PAI-Megatron-Patch is bundled), how parallel dims (TP / EP / CP / PP) are configured in the yaml while DP is auto-derived from card count, the msrun launch command shape, and the launch-time pitfalls (stale tail -F, "step 200 error" masks, HCCL ret:4). Stops at the launch — performance / precision analysis is a separate skill.
+when_to_use: User asks to run / kick off / launch / 跑起来 / 拉起 a MindFormers training, msrun something, or train a yaml in PYNATIVE_MODE (--mode 1); user is starting fresh — "I want to train DeepSeek-V3 / Qwen3 with N cards"; user reports a training failed to start, hung in init, crashed early; the conversation references dp/tp/ep/cp/pp configuration, ASCEND_RT_VISIBLE_DEVICES, BlendedMegatronDatasetDataLoader, data_path, load_path, or run_mindformer.py.
 ---
 
-# MindFormers Pynative Training: Run & Observe
+# MindFormers Pynative Training: Launch
 
-A skill for the parts you do EVERY time you touch this repo: launch a training, wait, read the loss / per_step_time, recognize what went wrong. Specific to **pynative-mode** MindFormers on Ascend with `msrun`.
+A skill for **launching** a MindFormers pynative training job from a clean state. Pre-launch checklist (yaml → dataset → card count → command), the launch itself, and the first 30 seconds of "is it actually running yet" debugging.
 
-If the task is performance optimization (profile reading, optimizer window timing, comm breakdown), this skill is the prerequisite — the `mindformers-pynative-perf-workflow` skill (sibling) builds on top of this one.
+This skill is **dynamic-graph only** — every launch passes `--mode 1` (PYNATIVE_MODE). For graph mode (`--mode 0`) you're on your own.
+
+If you need to **measure or compare** a finished run (per_step_time medians, loss bit-identity, profile analysis), that's the sibling skill `mindformers-pynative-perf-analysis`. This skill stops the moment training prints its first loss line.
 
 ---
 
 ## Scripts in this skill
 
-Helpers under `scripts/` next to this SKILL.md. They wrap the regex / dict-diff
-work you'd otherwise have to retype every session. When this skill is installed
-globally, the dir lives at `~/.claude/skills/mindformers-pynative-training-run/scripts/`.
+Helpers under `scripts/` next to this SKILL.md. When installed globally, the dir is `~/.claude/skills/mindformers-pynative-training-run/scripts/`.
 
 | Script | When to use | Example |
 |---|---|---|
-| [`median_per_step.py`](scripts/median_per_step.py) | After a training finishes, to read median/mean/min/max per_step_time and the final loss from `worker_0.log`. Steady-state only (defaults to dropping warmup steps ≤ 50). | `python3 scripts/median_per_step.py output/run/worker_0.log` |
-| [`compare_loss.py`](scripts/compare_loss.py) | To verify an optimization is math-equivalent: diffs per-step loss between two `worker_0.log`s. Emits `bit-identical` for tol=0; otherwise classifies the relative diff (FP-order vs moderate vs real change). | `python3 scripts/compare_loss.py before/worker_0.log after/worker_0.log` |
-
-Both scripts handle the per_step_time log line format (`per_step_time:    535ms`) and the 50-step rolling buffer the loss callback uses.
+| [`download_sample_dataset.py`](scripts/download_sample_dataset.py) | The user has no prepared dataset and wants the PAI-Megatron-Patch sample (already idx/bin packed). Supports `deepseek_v3` (~4.3 GB) and `qwen3` (~197 MB). Resumes if partially downloaded; skips when already complete. Prints the exact `data_path` block to paste into the yaml. | `python3 scripts/download_sample_dataset.py --model qwen3 --dest /data/datasets/qwen3` |
 
 ---
 
-## TL;DR (90-second version)
+## Pre-launch checklist
+
+A launch needs four things. **Before you run anything, walk this list with the user.**
+
+### 1. A base yaml
+
+**You don't write one from scratch.** Ask the user for the yaml they want to use (most projects already have a family of them; e.g. this repo has `dsv3_pynative_24layers_*.yaml` covering parallel matrices). If they don't have one, point them at an existing yaml in the project and ask which model + scale to start from — then they edit it in-place rather than you generating one.
+
+Once they hand you a yaml, scan it for the four sections you'll touch below:
 
 ```bash
-# 1. Pick a yaml from the project root (see "YAML variants" below)
-# 2. Wipe old profile + launch — log_dir is one-per-config-per-day convention
+grep -nE "^checkpoint:|^parallelism:|^train_dataset:|^optimizer:|^profiler:|^model:" <yaml>
+```
+
+You should see all of `checkpoint:` (block, top-level), `parallelism:`, `train_dataset:`, `optimizer:`, `model:`, `profiler:`. If any is missing, the yaml is incomplete — ask the user where the rest is or pick a sibling yaml as the template.
+
+### 2. Card count → `ASCEND_RT_VISIBLE_DEVICES`
+
+**Card count is the env var, not a yaml field.** MindFormers reads `ASCEND_RT_VISIBLE_DEVICES` (comma-separated device ids) to know how many NPUs it can use; `msrun --worker_num=N` must match.
+
+```bash
+# Examples:
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7    # 8-card job
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3            # 4-card job
+export ASCEND_RT_VISIBLE_DEVICES=0                  # single-card debug
+```
+
+Ask the user how many cards they want to use. Then `--worker_num` and `--local_worker_num` in the msrun command both equal that number for a single-host job.
+
+### 3. Parallel-dim configuration in the yaml (TP / EP / CP / PP)
+
+In the yaml's `parallelism:` block, **only TP / EP / CP / PP need explicit values.** **DP is computed automatically** as
+```
+data_parallel = world_size / (tensor_parallel * pipeline_parallel * context_parallel)
+```
+where `world_size` comes from `ASCEND_RT_VISIBLE_DEVICES`. EP slices the MoE experts orthogonally; it doesn't reduce DP.
+
+| Knob | Yaml key | Default | When to bump it |
+|---|---|---|---|
+| Tensor parallel | `parallelism.tensor_parallel` | 1 | Single layer's attention/MLP doesn't fit one card's memory — shard column/row matmul across N cards. Adds intra-layer all-reduce; only worth it for big hidden_size. |
+| Expert parallel | `parallelism.expert_parallel` | 1 | MoE model, experts don't all fit on one card. Routes tokens via all-to-all; cheap relative to TP for the same memory saving on MoE weights. |
+| Context parallel | `parallelism.context_parallel` | 1 | Very long sequences (≥ 32k); shards the sequence dim across cards. The `context_parallel_method` field (e.g. `colossal`) picks the algorithm. |
+| Pipeline parallel | `parallelism.pipeline_parallel` | 1 | Model too deep for one card; split layer-groups across pipeline stages. Adds bubble overhead; usually a last resort. |
+| Data parallel | *(not set)* | auto | **Do not configure.** It's `world_size / (tp * pp * cp)`. |
+
+**Constraint:** `tp * pp * cp` must divide `world_size`. If it doesn't, msrun will error at startup with a confusing layout message — fix it before launching.
+
+The yaml family in `dsv3_pynative_24layers_*` shows the patterns in practice:
+
+| Yaml suffix | tp | ep | cp | pp | Resulting DP on 8 cards |
+|---|---|---|---|---|---|
+| `single` | 1 | 1 | 1 | 1 | 8 (pure FSDP) |
+| `dp4tp2` | 2 | 1 | 1 | 1 | 4 |
+| `dp2tp4` | 4 | 1 | 1 | 1 | 2 |
+| `dp4ep2` | 1 | 2 | 1 | 1 | 8 (DP unaffected by EP) |
+| `dp2tp2ep2` | 2 | 2 | 1 | 1 | 4 |
+
+`global_batch_size` (e.g. `training.global_batch_size: 8`) = `local_batch_size * dp`. If you change card count or parallel dims, recompute it.
+
+### 4. Dataset — inspect, decide, fill
+
+Open the yaml and find `train_dataset.dataloader.config.data_path`:
+
+```yaml
+train_dataset:
+  dataloader:
+    type: BlendedMegatronDatasetDataLoader
+    ...
+    config:
+      ...
+      data_path:
+        - '1'
+        - "/some/path/mmap_<...>_text_document"     # ← the prefix, no .bin/.idx
+```
+
+The `'1'` is the megatron blending weight (keep it). The second entry is the **prefix** of a paired `.bin` / `.idx` file — `text_document.bin` and `text_document.idx` should both exist at `<prefix>.bin` / `<prefix>.idx`.
+
+Decision tree:
+
+1. **Path exists and `.bin` + `.idx` are present?** Skip — dataset is ready.
+   ```bash
+   # Extract the prefix from the data_path block (the "..." line under data_path:,
+   # not the '1' blending-weight line above it)
+   PREFIX=$(grep -A2 'data_path:' <yaml> | grep -oE '"[^"]+"' | head -1 | tr -d '"')
+   ls "${PREFIX}.bin" "${PREFIX}.idx"
+   ```
+2. **Placeholder (`/path/to/...`, empty, or path doesn't exist)?** Ask the user:
+   - "**Do you already have your own megatron `.bin` + `.idx`** (or another format we can convert)?"
+     - If yes → user gives the prefix → edit the yaml's `data_path` to point at it.
+     - If they have HF-format data instead → tell them they'll need to convert to megatron format first (out of scope for this skill).
+   - "**Or use a prepared sample dataset** from PAI-Megatron-Patch?"
+     - Ask for a destination dir (they should pick a disk with ≥ 5 GB free for DeepSeek-V3; the script writes the bin+idx pair there).
+     - Run `scripts/download_sample_dataset.py --model <deepseek_v3|qwen3> --dest <dir>`.
+     - It prints the exact `data_path` block to paste into the yaml on completion.
+
+The two sample datasets (PAI-Megatron-Patch sources, hosted on Aliyun OSS) are already tokenized:
+
+| Model | Tokenizer | bin size | idx size |
+|---|---|---|---|
+| `deepseek_v3` | DeepSeekV2Tokenizer | 4.3 GB | 18 MB |
+| `qwen3` | Qwen tokenizer | 197 MB | 1 MB |
+
+**Tokenizer compatibility:** the sample dataset's tokenizer must match the model's `vocab_size` and tokenization in the yaml. The deepseek_v3 sample fits `model.vocab_size: 129280` (DeepSeek-V3) out of the box; using qwen3 data with a deepseek model (or vice versa) will train but the loss signal will be nonsense.
+
+### 5. Checkpoint — is it needed?
+
+**Usually no.** Inspect the yaml's top-level `checkpoint:` block:
+
+```yaml
+checkpoint:
+  enable_save: False                                  # we don't save by default
+  load_path: "output/pynative/checkpoint_24layers"   # if non-empty + dir exists, it loads
+```
+
+- `load_path: ""` (empty) → starts from **random init**. Fine for a smoke test, perf measurement, or first training run.
+- `load_path: "<existing dir>"` → loads it. Used when reproducing a known starting point (e.g. comparing two code paths from the same step-200 weights).
+
+`enable_save: False` is the common pattern for this kind of work — you're measuring, not checkpointing. Flip to `True` only if the user explicitly wants to save.
+
+If `load_path` is set but the dir doesn't exist, training will error at the load step. Either point it at a real dir or clear the field.
+
+---
+
+## Launch
+
+Once the four pre-launch items are settled, the command is mechanical:
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7    # match --worker_num below
+
 rm -rf profile/ && msrun \
   --tail_worker_log=0 \
   --worker_num=8 --local_worker_num=8 \
   --master_port=6259 \
-  --log_dir=./output/pynative_24layers/dp8_agd \
+  --log_dir=./output/<your_run_label> \
   --join=True --cluster_time_out=7200 \
   run_mindformer.py \
-  --config ./dsv3_pynative_24layers_single_agd.yaml \
+  --config ./<your_yaml> \
   --mode 1
 ```
 
-- `--mode 1` is **PYNATIVE_MODE** (graph mode is `--mode 0`). Always 1 for this work.
-- `--tail_worker_log=0` suppresses worker stdout in msrun's own output. Logs go to `--log_dir`.
-- Each rank gets its own `worker_<rank>.log` in `--log_dir`.
-- Profile (if the yaml enables it) lands in `./profile/192-168-9-112_<PID>_<TIMESTAMP>_ascend_ms/` per rank.
+Knobs that always look the same:
 
-Run training in the **background** so you can keep working — see the [Background pattern](#background-pattern) section.
+- `--mode 1` — PYNATIVE_MODE. Non-negotiable for this skill.
+- `--tail_worker_log=0` — workers log to files, not msrun stdout. Stdout becomes scannable.
+- `--worker_num` == `--local_worker_num` for a single-host job. **Must equal the number of cards in `ASCEND_RT_VISIBLE_DEVICES`.**
+- `--master_port` — anything free; 6259 is the project's habit.
+- `--log_dir` — one dir per run; gets `worker_<rank>.log` for each rank. Pick a descriptive label so a later `ls output/` is readable.
+- `--join=True` — msrun blocks until all workers exit. Without `--join`, msrun returns once workers are launched and you lose the exit-code signal.
+- `--cluster_time_out=7200` — 2 h for the rank-0 to rank-N init handshake; raise it for very large jobs.
 
----
+`rm -rf profile/` before the run is **only** needed if the yaml has `profiler.enable_profiling: True`. Otherwise it's a no-op — but harmless.
 
-## YAML variants (this repo)
+### Run in the background
 
-Each parallel scenario typically has both a baseline (allgather mode) and an AGD (allgather_deredundency) variant. **For Muon optimizer work, use `*_agd.yaml`.**
-
-```
-dsv3_pynative_24layers_single.yaml         # baseline, dp1 single-card debug
-dsv3_pynative_24layers_single_agd.yaml     # AGD, dp1
-dsv3_pynative_24layers_dp4tp2.yaml         # baseline, dp4 × tp2
-dsv3_pynative_24layers_dp4tp2_agd.yaml     # AGD, dp4 × tp2
-# The "single" config name is a misnomer in dp8 context — when launched with
-# --worker_num=8 and a yaml that has tensor_parallel: 1 and pipeline_parallel: 1,
-# it's pure-FSDP dp8. Confirm by reading the yaml's `tensor_parallel` /
-# `data_parallel` lines.
-```
-
-Quick check: `grep -E "tensor_parallel|data_parallel|pipeline_parallel|comm_strategy" dsv3_*.yaml`
-
-If you need to confirm AGD is selected, look for:
-```yaml
-optimizer:
-  type: Muon
-  comm_strategy: allgather_deredundency  # ← required for AGD path
-```
-Absence of that line means the optimizer falls back to the default `allgather` strategy.
-
----
-
-## Log layout
-
-```
-output/pynative_24layers/<run_label>/
-├── scheduler.log
-├── worker_0.log   ← rank 0 — most analysis happens here
-├── worker_1.log
-├── ...
-└── worker_7.log
-
-profile/                                        # cwd-relative, configured in yaml
-└── 192-168-9-112_<PID>_<TIMESTAMP>_ascend_ms/  # one per rank
-    ├── ASCEND_PROFILER_OUTPUT/
-    │   ├── step_trace_time.csv
-    │   ├── communication.json
-    │   ├── trace_view.json
-    │   ├── op_statistic.csv
-    │   └── kernel_details.csv
-    ├── FRAMEWORK/
-    └── PROF_*/
-```
-
-**Convention: pick `worker_0.log` for the rank-level view.** It's enough for loss/per_step_time. Cross-rank checks (`for f in worker_*.log; do …`) only when needed.
-
----
-
-## Background pattern
-
-Training takes 3–8 minutes for a 250-step run. Always run in the background so the agent stays productive:
+Training takes minutes (24L sample) to hours (real models). Launch in background so the agent can keep working:
 
 ```python
-Bash(command="rm -rf profile/ && msrun … run_mindformer.py --config … --mode 1 2>&1 | tail -3",
+Bash(command="export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 && "
+             "rm -rf profile/ && msrun … run_mindformer.py --config <yaml> --mode 1 2>&1 | tail -3",
      run_in_background=True,
-     timeout=900000)        # 15 min; bump if 24-layer + larger model
+     timeout=1800000)   # 30 min for a 250-step debug run; bump for real training
 ```
 
-Then arm a `Monitor` to surface init/late-step/error events without polling:
+Then arm a `Monitor` to surface init progress, late-step completion, and errors without polling:
 
 ```bash
-# In the Monitor command:
-until [ -f output/pynative_*/dp8_agd/worker_0.log ]; do sleep 2; done
-tail -F output/pynative_*/dp8_agd/worker_0.log 2>&1 \
+# Wait for the log file to appear, then watch for interesting events
+until [ -f output/<your_run_label>/worker_0.log ]; do sleep 2; done
+tail -F output/<your_run_label>/worker_0.log 2>&1 \
   | grep --line-buffered -E \
-    "refined assignment|step:\[ *250/  250\]|Traceback|RuntimeError|HcomRecv|AttributeError|KeyError|FAILED|Killed|OOM|Error in training step"
+    "step:\[ *[0-9]+/  *[0-9]+\]|Traceback|RuntimeError|HcomRecv|AttributeError|FAILED|Killed|OOM|Error in training step"
 ```
 
-The background Bash will notify on completion. The Monitor surfaces errors mid-run.
+The background Bash will notify on completion. Until then, the Monitor surfaces problems mid-run.
 
 ---
 
-## Stale-log gotcha (read this before debugging "step 200 error")
+## Is it actually running yet?
 
-When a second `msrun` reuses the same `--log_dir`, `worker_*.log` is **truncated** at startup. But:
-
-- `tail -F` may emit the **previous run's tail content first** before truncation happens.
-- This often shows up as the Monitor reporting a `step 250` completion or `Error in training step N` with a stale timestamp — usually it's BEFORE the new run's own init log timestamp.
-
-**How to tell whether an event is stale:**
-1. Check the timestamp on the event vs when you actually launched the new run.
-2. `pgrep -f "<unique part of the yaml name>"` — if the process IDs match `bash`'s background task, the new run is still alive.
-3. Read the bottom of the file with `tail -1 worker_0.log` — if it's still in init (e.g., `mindformers/pynative/base_models/...`) you're seeing stale tail-F content.
-
-**Don't react to** a `step 250` or `Error in training step 200` event that fires within ~30s of launching a new run — wait for the real `refined assignment` line (first line printed by muon's `_recompute_muon_assigned_ranks` at the first optimizer call) to confirm the new run has actually entered training.
-
----
-
-## Extracting `per_step_time` and `loss`
-
-The loss callback in this repo logs lines that look like:
-
-```
-{ step:[   53/  250], loss:  11.687554, per_step_time:    535ms, load_balancing_loss:   1.082657, lr: 1.000000e-06, grad_norm:  14.964324, throughput:   6.99T }
-```
-
-**Use the bundled script — no need to retype the regex every time:**
+Common point of confusion in the first 30 s: a freshly-started job may not have printed `loss:` yet but is *not* hung — it's still in model construction or dataset setup. Use this ladder to tell:
 
 ```bash
-python3 ${SKILL_DIR}/scripts/median_per_step.py output/.../worker_0.log
+# 1. Process alive?
+pgrep -f "<unique substring from yaml name>" | head -3
+# 2. Most recent log activity?
+tail -3 output/<your_run_label>/worker_0.log
+# 3. Has it reached the first optimizer step?
+grep -E "step:\[ +1/" output/<your_run_label>/worker_0.log
 ```
 
-Output:
-
-```
-file:           output/.../worker_0.log
-steps measured: 50  (from step 201 to 250)
-  median per_step: 1386.5 ms
-  mean   per_step: 1780.9 ms
-  min    per_step: 1194 ms
-  max    per_step: 11170 ms
-  final loss @ step 250: 11.591713
-```
-
-`--warmup N` filters out steps `<= N` (default 50). **Important: this repo's loss_callback only emits the LAST 50 steps** (steps 201–250 in a 250-step run); the script's default warmup already accounts for this.
-
-> `${SKILL_DIR}` resolves to `~/.claude/skills/mindformers-pynative-training-run/` when the skill is installed globally. Use the absolute path or `cd` into the skill dir.
+Init typically goes: msrun init → `Building model from config` → (optional) `Loaded checkpoint` → first dataset batch → first `step:[ 1/...]` log line. That can take 30 s – 2 min depending on model size and whether weights are being loaded.
 
 ---
 
-## Loss bit-identity check across two runs
+## Stale-log gotcha (read this when "step 200 error" shows up at second 0)
 
-Used heavily for verifying optimization correctness — same code path → same loss to every decimal:
+When a **second** `msrun` reuses the same `--log_dir`, the worker_*.log files are **truncated** at startup. But:
 
-```bash
-python3 ${SKILL_DIR}/scripts/compare_loss.py \
-  output/run_before/worker_0.log \
-  output/run_after/worker_0.log
-```
+- `tail -F` may emit the previous run's tail content first (between when you launched and when the new run truncates the file).
+- A Monitor watching the file will fire on a `step:[ 250/ 250]` or `Error in training step N` from the *previous* run.
 
-Output on a clean optimization (mathematically equivalent):
+**How to tell:**
 
-```
-a:        output/run_before/worker_0.log
-b:        output/run_after/worker_0.log
-common steps: 50  (201..250)
-max abs(a-b): 0.000000e+00
-=> OK — bit-identical (within tol=0.0)
-```
+1. Timestamp on the event vs your launch time. Stale events are seconds *before* your launch.
+2. `pgrep -f "<yaml name>"` matches your new background Bash → the new run is alive.
+3. `tail -1 worker_0.log` — if it's still printing init lines (model build, dataset load), you're seeing stale tail content.
 
-Pass `--tol 1e-5` to permit FP-order round-off (e.g. when comparing across mm→bmm or allreduce reordering changes). The script also auto-classifies the relative diff:
-
-- `max relative diff < 1e-4` → likely FP accumulation order, **math-equivalent**
-- `1e-4 < max rel < 1e-2` → moderate, inspect whether your change touches large reductions
-- `> 1e-2` → likely a real semantic change, verify correctness
-
-**What counts as "equivalent vs broken":**
-- `mm` → `bmm` on Ascend produces ~1e-5 relative round-off difference (different FP accumulation order). Same direction, same convergence. **Equivalent.**
-- `max` / `allreduce` / pure tensor reshapes / data-movement-only optimizations should be **bit-identical**.
-- Anything > 1e-3 relative is suspicious — investigate.
+**Don't react** to errors that fire within ~30 s of launch. Wait for either:
+- A fresh `step:[ 1/...]` line (definitive proof training started), OR
+- A new traceback whose timestamp is *after* your launch.
 
 ---
 
-## Variance budget
+## Launch-time error signatures
 
-Single-sample `per_step_time` on this setup has surprisingly wide variance — **~100 ms peak-to-peak across consecutive runs of the same code**. The signal floor for "real wall-clock improvement" is roughly **30 ms median delta** based on multiple samples.
-
-**Rules of thumb:**
-- Single run, median = 1460 ms. Re-run same code, median = 1420 ms. → noise.
-- Single run, median = 1583 ms vs 1460 ms across two samples. → real (you'd see it in min, mean, and median).
-- Always pull both `median` and `min` — a real optimization moves both.
-
-For tight comparisons, run each variant **at least 2 times** and average the medians.
-
----
-
-## Error signature lookup
+These are the errors you actually hit at launch / first few steps. Mid-training errors (perf regressions, numerical issues) belong in the perf-analysis skill.
 
 | What you see | Likely cause | Fix |
 |---|---|---|
-| `HcomRecv failed, ret:4` + `parameter tag, local end ... remote end ...` + `parameter cmdType, local X remote Y` | HCCL tag-less P2P FIFO mismatch from per-rank op reordering | See sibling `ascend-hccl-p2p-pitfalls` skill — DON'T reorder isend/irecv per rank |
-| `Error in training step 200` (or some step N before any loss logs) | Often a real error masquerading as "step 200" — `step` is the optimizer-call counter, gradient_accumulation can delay the first optimizer call to step 200 | Look at the full Traceback **above** the `Error in training step` line — that's the actual error |
-| `AttributeError: '<wrapper>...' object has no attribute '...'` when calling a model method from muon | Wrapper class (`HSDP*ForCausalLM`) doesn't auto-forward — uses explicit delegation in `mindformers/parallel_core/utils/model_mixin.py` | Add a method on `model_mixin.py` that forwards to `model.<name>` |
-| Run "hangs" but pgrep shows process alive + `worker_0.log` last line is `Parsing: [###...]` | Profiler post-processing after training completed | Wait — parsing can take 1–3 min for 8 ranks |
-| No `loss:` lines in `worker_0.log` but process alive ~minutes | Still in model construction / startup; check last log line | Wait ~30s–2min for `Building model from config` → `Loaded checkpoint` → first optimizer step |
-| `OOM` / "Out of memory" | Larger model than what fits; check `hidden_size`, `num_moe_experts`, `seq_length` in yaml | Reduce micro_batch or sequence_length, or use a smaller yaml variant |
+| `Error in training step 200` printed during init (no real steps yet) | The previous run's stale-log tail (see above) | Confirm with `pgrep` + timestamp; if new run alive, ignore the stale event |
+| `Error in training step N` *after* real init logs | Real error — the traceback is several lines **above** this line | Scroll up in `worker_0.log` to find the actual Python exception |
+| `HcomRecv failed, ret:4` + `parameter tag, local ... remote ...` mismatch | HCCL tag-less P2P FIFO mismatch — usually per-rank op reordering bug | Out of scope for launch; see the codebase's HCCL pitfalls notes |
+| `AttributeError: '<HSDP...ForCausalLM>' object has no attribute '<method>'` | Wrapper class doesn't auto-forward to GPTModel | Add the forward in `mindformers/parallel_core/utils/model_mixin.py` |
+| `tp * pp * cp does not divide world_size` (or analogous layout error) | Parallel dim mismatch with card count | Recompute: `world_size = len(ASCEND_RT_VISIBLE_DEVICES.split(','))`, then `tp*pp*cp` must divide it |
+| Run "hangs" + `worker_0.log` last line is `Parsing: [###...]` | Profiler post-processing after training completed | Wait — parsing takes 1–3 min for 8 ranks |
+| `OOM` / "Out of memory" during forward | Model + batch + activations don't fit | Reduce `local_batch_size`, `seq_length`, or bump `tensor_parallel` |
+| `FileNotFoundError: ...text_document.idx` | data_path wrong / file missing | Re-verify the prefix; `ls <prefix>.bin <prefix>.idx` |
 
 ---
 
-## Common Bash recipes
+## Common Bash recipes (launch-time)
 
 ```bash
-# Did the run complete?
-grep "step:\[  250/  250\]" output/.../worker_0.log
+# Did the new run actually start? (first real step line)
+grep -m1 "step:\[ +1/" output/<your_run_label>/worker_0.log
 
-# Is it still alive?
-pgrep -f "dsv3_pynative_24layers_dp4tp2_agd" | head -3
+# Is the run alive?
+pgrep -af "msrun.*<your_yaml>" | head -3
 
-# What did rank 0 do for qk_clip?
-grep "max_attention_logit/max:" output/.../worker_0.log | tail -5
+# What is rank 0 doing right now?
+grep -v "^$" output/<your_run_label>/worker_0.log | tail -3 | cut -c1-180
 
-# Was the AGD assignment as expected?
-grep "refined assignment" output/.../worker_0.log | head -1
-
-# Latest non-blank line (status check)
-grep -v "^$" output/.../worker_0.log | tail -3 | cut -c1-180
+# Confirm the parallel layout the run picked
+grep -E "data_parallel|tensor_parallel|expert_parallel|context_parallel|pipeline_parallel" \
+  output/<your_run_label>/worker_0.log | head -10
 ```
 
 ---
 
-## Verification step before reporting "X is faster"
+## What this skill does NOT cover
 
-After implementing any optimization, the minimum proof loop:
-
-1. **Run** with new code; capture `output/.../worker_0.log` and `profile/`.
-2. **Loss check** — compare loss with a previous bit-identical-target run, OR validate that the run completes 250 steps without loss explosion (final ≈ 11.59 for the 24L dp8 setup).
-3. **Median per_step check** — compute median across steps 51–250 and compare to the baseline median you recorded earlier. Re-run if delta is < 30 ms (within noise).
-4. **Commit** with the actual numbers in the message body — `median per_step: 1583 → 1400 ms`, not just "faster".
-
-If correctness is in doubt, re-run **twice** with the same code and confirm both samples land in the same range. Bit-identity across two runs of the same code = code is deterministic.
+- Reading `profile/` data → `mindformers-pynative-perf-analysis`.
+- Median per_step_time / loss extraction → `mindformers-pynative-perf-analysis` (`median_per_step.py`).
+- Loss bit-identity / precision comparison between two runs → `mindformers-pynative-perf-analysis` (`compare_loss.py`).
+- Graph mode (`--mode 0`) — different code path, different debug surface.
+- Converting raw text → megatron `.bin` / `.idx` (use Megatron-LM's `tools/preprocess_data.py` upstream).
+- Editing the model architecture in the yaml (hidden_size, num_layers, vocab_size) — those are model-design decisions, not launch decisions.
