@@ -52,16 +52,6 @@ If you're on a different stack (PyTorch/CUDA, graph mode, single-card debug only
 skills will still be useful for the generic "background-run + read worker log" patterns
 but the file-format specifics are Ascend-only.
 
-## What's missing (potential follow-ups)
-
-These skills cover the **workflow**. Future additions might include:
-
-- `ascend-hccl-p2p-pitfalls` — the tag-less `isend/irecv` per-rank-sequence trap. Symptom is `HcomRecv ret:4` with tag mismatch errors.
-- `mindformers-muon-allgather-deredundency-internals` — Muon optimizer code structure (5 phases, `_apply_muon_ns_batched`, `group_sig`, `_infer_slice_area_by_rank`).
-- `mindspore-pynative-optimization-patterns` — generic MindSpore patterns (`mint.add(alpha=)` fuse, `asnumpy()` batching, DTensor metadata caching, `SkipDTensorDispatch`).
-
-These haven't been written yet — see issues/PRs welcome.
-
 ## Authoring / contributing
 
 Each skill is one directory under `skills/` with a `SKILL.md` file. The `SKILL.md`
