@@ -12,6 +12,33 @@ How to read what the Ascend profiler dumps from a MindFormers pynative training 
 
 ---
 
+## Scripts in this skill
+
+Helpers under `scripts/` next to this SKILL.md. They wrap the JSON-parsing and
+event-correlation work you'd otherwise retype every session. When this skill is
+installed globally, the dir lives at `~/.claude/skills/mindformers-pynative-perf-analysis/scripts/`.
+
+All scripts accept a profile dir in any of these shapes (`_paths.py` normalizes):
+
+- the `ASCEND_PROFILER_OUTPUT/` dir directly
+- the rank dir (`192-168-9-112_<PID>_<TS>_ascend_ms/`)
+- the parent `profile/` dir (uses rank 0)
+
+| Script | When to use | Example |
+|---|---|---|
+| [`step_trace_summary.py`](scripts/step_trace_summary.py) | **ALWAYS FIRST.** Classifies bottleneck as Computing / Comm-NotOverlapped / Free and prints a suggested next direction. Reads `step_trace_time.csv`. | `python3 scripts/step_trace_summary.py profile/` |
+| [`comm_breakdown.py`](scripts/comm_breakdown.py) | After step_trace says comm-bound, to see WHICH op type. Aggregates `communication.json` by op with count, elapse, transit, wait, transit size. Sorted by elapse desc. | `python3 scripts/comm_breakdown.py profile/` |
+| [`optimizer_window.py`](scripts/optimizer_window.py) | To answer "how long was the optimizer in this step?" and "what was the device doing in that window?". Finds a Python-function event in `trace_view.json` and aggregates concurrent device kernels by bucket. Defaults to `muon.py(...):construct`; pass `--pattern foo.py --func bar` for other functions. **Parsing trace_view.json takes ~10–30s** (file is 100MB+). | `python3 scripts/optimizer_window.py profile/` |
+| [`compare_comm.py`](scripts/compare_comm.py) | Diff two profiles' `communication.json` to attribute a wall-clock delta to a specific op-type / op-count change. Sorted by ❘Δelapse❘ desc. Big count drop = batching landed. | `python3 scripts/compare_comm.py profile_before/ profile_after/` |
+
+Behavior the scripts encode that you should remember:
+
+- **`optimizer_window.py` auto-discovers device pids** by reading `process_name` metadata events — pids differ across profile sessions, do not hardcode them.
+- **`comm_breakdown.py` filters `Total Op Info` rollups** automatically; if you write your own ad-hoc aggregator, you'll double-count without that filter.
+- **`step_trace_summary.py` checks the `Communication = NotOverlapped + Overlapped` invariant** and warns if slop > 1us — useful when a stale CSV got mixed into a profile dir.
+
+---
+
 ## The four files that matter
 
 ```
@@ -47,17 +74,28 @@ profiled_step ≈ Computing + Communication(Not Overlapped) + Free + Preparing
 Communication = Communication(Not Overlapped) + Overlapped
 ```
 
-Quick read of a single row:
+Use the bundled script (prints buckets, runs invariant check, and tells you the next direction in one shot):
 
 ```bash
-NEW=$(ls -d profile/192-168-9-112_*_ascend_ms | head -1)/ASCEND_PROFILER_OUTPUT
-cat $NEW/step_trace_time.csv
+python3 scripts/step_trace_summary.py profile/
 ```
 
 For our 24L dp8 baseline (step 6, in ms):
+
 ```
-Step  Computing  Comm-NotOverlapped  Overlapped  Communication  Free
-6     416.7      2302.0              328.8       2630.8         631.2
+=== Step 6 ===
+  Computing            :   416.7 ms
+  Comm-NotOverlapped   :  2302.0 ms
+  Overlapped           :   328.8 ms
+  Communication (total):  2630.8 ms
+  Free                 :   631.2 ms
+  Preparing            :     0.0 ms
+  ----
+  ~step (sum)          :  3349.9 ms
+
+  dominant bucket: Comm-NotOverlapped (66% of step)
+  → Comm-bound. Run `comm_breakdown.py` next to see which op type. …
+  ⚠ Overlapped/Comm = 12% — pipeline is sparse; issue async comms earlier, defer waits
 ```
 
 ### Bottleneck classification & next move
@@ -105,43 +143,24 @@ This file aggregates every collective and P2P op the profiled step issued. The s
 }
 ```
 
-Aggregate by op type:
+Aggregate by op type — use the bundled script:
 
-```python
-import json
-from collections import defaultdict
-
-with open(f"{NEW}/communication.json") as f:
-    data = json.load(f)
-step = list(data.values())[0]                  # 'step6'
-
-agg = defaultdict(lambda: {'c': 0, 'e': 0.0, 'sz': 0.0})
-for kind in ('collective', 'p2p'):
-    for name, info in step.get(kind, {}).items():
-        if 'Total Op Info' in name:
-            continue                                          # skip rollup row
-        op = name.split('hcom_')[1].split('_')[0] if 'hcom_' in name else name
-        t = info.get('Communication Time Info', {})
-        bw = info.get('Communication Bandwidth Info', {})
-        agg[(kind, op)]['c'] += 1
-        agg[(kind, op)]['e'] += t.get('Elapse Time(ms)', 0)
-        agg[(kind, op)]['sz'] += (
-            bw.get('HCCS', {}).get('Transit Size(MB)', 0)
-            + bw.get('SDMA', {}).get('Transit Size(MB)', 0))
-
-for k, v in sorted(agg.items(), key=lambda x: -x[1]['e']):
-    print(f"  {k[0]:11s} {k[1]:14s} cnt={v['c']:4d} elapse={v['e']:8.1f}ms size={v['sz']:8.1f}MB")
+```bash
+python3 scripts/comm_breakdown.py profile/
 ```
 
-What the typical output looks like (24L dp8 AGD, rank 0):
+What the output looks like (24L dp8 AGD, rank 0):
 
 ```
-collective  allGather      cnt= 624  elapse= 1035.0ms  size= 14458.4MB
-collective  reduceScatter  cnt= 312  elapse=  851.9ms  size=  7679.7MB
-collective  allReduce      cnt=  28  elapse=  274.3ms  size=     0.0MB
-collective  send           cnt= 293  elapse=  242.9ms  size=     0.0MB
-collective  receive        cnt= 293  elapse=  226.6ms  size=   221.7MB
+  kind        op              count      elapse     transit        wait        size
+  collective  allGather         624    1035.0ms    420.1ms    614.9ms   14458.4MB
+  collective  reduceScatter     312     851.9ms    326.4ms    525.5ms    7679.7MB
+  collective  allReduce          28     274.3ms     63.7ms    210.6ms       0.0MB
+  collective  send              293     242.9ms    220.6ms     22.3ms       0.0MB
+  collective  receive           293     226.6ms     12.4ms    214.2ms     221.7MB
 ```
+
+The transit-vs-wait split is the giveaway: high `wait` + low `transit` = ops blocked on dependency, not on bandwidth.
 
 ### Interpreting the breakdown
 
@@ -152,120 +171,84 @@ collective  receive        cnt= 293  elapse=  226.6ms  size=   221.7MB
 
 ### Cross-run comparison (the actual optimization decision)
 
-Two runs side-by-side, by op type:
+Two runs side-by-side, by op type — use `compare_comm.py`:
 
-```python
-def by_op(path):
-    with open(path) as f: d = json.load(f)
-    step = list(d.values())[0]
-    out = defaultdict(lambda: {'c': 0, 'e': 0.0})
-    for kind in ('collective', 'p2p'):
-        for n, info in step.get(kind, {}).items():
-            if 'Total Op Info' in n: continue
-            op = n.split('hcom_')[1].split('_')[0] if 'hcom_' in n else n
-            t = info.get('Communication Time Info', {})
-            out[(kind, op)]['c'] += 1
-            out[(kind, op)]['e'] += t.get('Elapse Time(ms)', 0)
-    return out
+```bash
+python3 scripts/compare_comm.py profile_before/ profile_after/
+```
 
-a, b = by_op("profile_before/.../communication.json"), by_op("profile_after/.../communication.json")
-all_keys = set(a) | set(b)
-for k in sorted(all_keys, key=lambda k: -(a.get(k, {'e':0})['e'] + b.get(k, {'e':0})['e'])):
-    ac, ae = a.get(k, {'c':0,'e':0.0})['c'], a.get(k, {'c':0,'e':0.0})['e']
-    bc, be = b.get(k, {'c':0,'e':0.0})['c'], b.get(k, {'c':0,'e':0.0})['e']
-    print(f"  {k[0]:11s} {k[1]:14s}  {ac:4d}/{ae:7.1f}ms  →  {bc:4d}/{be:7.1f}ms  ({bc-ac:+d} ops, {be-ae:+7.1f}ms)")
+Output is sorted by `|Δ elapse|` desc so the biggest movers are on top:
+
+```
+  kind        op              cnt A/cnt B    Δcnt   elapse A elapse B    Δelapse
+  collective  allReduce          28/5         -23   274.3ms   52.1ms   -222.2ms
+  collective  send              293/293        +0   242.9ms  198.4ms    -44.5ms
+  …
+  TOTAL                                              2630.8ms 2342.9ms   -287.9ms
 ```
 
 A drop in **count** is the strongest signal that a batching optimization landed (e.g. `allReduce 28 → 5` after stacking the qk_clip per-layer allreduces). A drop in **elapse** without a count drop usually means the surrounding pipeline got less choppy — the same number of ops complete faster because they don't fight a busy stream.
+
+**One caveat about the TOTAL line:** profile-step elapse is noisy (~±50ms even on identical code). Trust counts more than the bottom-line elapse delta; cross-check the actual wall-clock improvement via `median_per_step.py` from the training-run skill.
 
 ---
 
 ## Step 3: extract function-level windows (trace_view.json)
 
-`trace_view.json` is a Chrome-trace-format dump of every event the profiler captured. Python-function events (from pynative) are tagged with `pid=1`, name = full source path with `(<line>):<funcname>`. Device-kernel events have larger pid values (e.g., `1599823264` for Ascend Hardware, `1599823328` for Communication).
+`trace_view.json` is a Chrome-trace-format dump of every event the profiler captured. Python-function events (from pynative) are tagged with `pid=1`, name = full source path with `(<line>):<funcname>`. Device-kernel events live under separately-named pids ("Ascend Hardware", "Communication") whose numeric ids **differ across profile sessions** — never hardcode them; the script in this skill discovers them via metadata events.
 
-### Get the optimizer construct window
+### Get the optimizer construct window + device kernel breakdown
 
-The single most-asked question — "how long is the optimizer step?" Match on `muon.py(...):construct`:
+The single most-asked question — "how long is the optimizer step, and what was the device doing in that window?" Use the bundled script:
 
-```python
-import json
-
-with open(f"{NEW}/trace_view.json") as f:
-    data = json.load(f)
-events = data if isinstance(data, list) else data.get('traceEvents', [])
-
-opt = None
-for e in events:
-    nm = e.get('name', '')
-    if isinstance(nm, str) and 'muon.py' in nm and ':construct' in nm and e.get('pid') == 1:
-        opt = e
-        break
-if opt:
-    print(f"optimizer construct: {float(opt['dur'])/1000:.1f} ms "
-          f"(started @ {float(opt['ts'])/1000:.0f}us)")
+```bash
+python3 scripts/optimizer_window.py profile/
 ```
 
-### Aggregate device kernels inside a time window
+(Defaults to matching `muon.py(...):construct`. Override with `--pattern <substring> --func <name>`.)
 
-To see WHAT the device was doing during the optimizer step:
+Example output (24L dp8, baseline):
 
-```python
-t0 = float(opt['ts'])
-t1 = t0 + float(opt['dur'])
+```
+profile: profile/192-168-9-112_<PID>_<TS>_ascend_ms/ASCEND_PROFILER_OUTPUT
+matched: .../muon.py(853):construct
+window: 920.6 ms  (ts 1234567us → 1235487us)
 
-from collections import defaultdict
-kern = defaultdict(lambda: {'c': 0, 'd': 0.0})
-for e in events:
-    if e.get('pid') not in (1599823264, 1599823328):    # Ascend Hardware + Communication
-        continue
-    if e.get('ph') != 'X':                              # complete events only
-        continue
-    try:
-        ts = float(e.get('ts'))
-        dur = float(e.get('dur', 0))
-    except (TypeError, ValueError):
-        continue
-    if ts < t0 or ts + dur > t1 + 1:
-        continue
+  bucket          count       total
+  --------------  -----  ----------
+  Notify_Wait      1488    614.3ms
+  EVENT_WAIT       1234    553.1ms
+  allGather         156    198.2ms
+  reduceScatter     156    134.5ms
+  compute          2401    127.4ms
+  …
+  --------------  -----  ----------
+  window dur                920.6ms
 
-    nm = e.get('name', '')
-    # classify
-    if   'allGather' in nm:        k = 'allGather'
-    elif 'allReduce' in nm:        k = 'allReduce'
-    elif 'reduceScatter' in nm:    k = 'reduceScatter'
-    elif 'Send' in nm:             k = 'P2P_send'
-    elif 'Receive' in nm:          k = 'P2P_recv'
-    elif 'Notify' in nm and 'Wait' in nm: k = 'Notify_Wait'
-    elif 'EVENT_WAIT' in nm:       k = 'EVENT_WAIT'
-    elif 'Memcpy' in nm or 'SDMA' in nm: k = 'Memcpy/SDMA'
-    else:                          k = 'compute'
-    kern[k]['c'] += 1
-    kern[k]['d'] += dur
-
-for k, v in sorted(kern.items(), key=lambda x: -x[1]['d']):
-    print(f"  {k:14s} cnt={v['c']:5d} dur={v['d']/1000:7.1f}ms")
+  Note: bucket totals are summed across compute+comm streams which run in
+  parallel, so they can exceed the window duration …
 ```
 
-In our baseline this turned up `Notify_Wait` and `EVENT_WAIT` totaling ~136ms inside a 205ms optimizer window — a clear signal that the device was idle waiting for synchronization, not computing. That kind of finding drives "fuse the per-layer launches" optimizations directly.
+`Notify_Wait` + `EVENT_WAIT` totalling more than the window itself = the device was idle waiting for synchronization, not computing. That kind of finding drives "fuse the per-layer launches" optimizations directly.
 
 ### Other useful Python function names to grep for
 
-```python
-# Find what the optimizer is iterating per-step (count = invocations per step)
+To verify a code change actually hit the new code path (e.g. count of `_apply_muon_ns_batched` vs `_apply_muon_ns` invocations per step), you can do a quick ad-hoc count without writing a script:
+
+```bash
+python3 -c "
+import json
 from collections import Counter
-muon_calls = Counter()
+d = json.load(open('profile/.../ASCEND_PROFILER_OUTPUT/trace_view.json'))
+events = d if isinstance(d, list) else d.get('traceEvents', [])
+c = Counter()
 for e in events:
     nm = e.get('name', '')
-    if not isinstance(nm, str): continue
-    if 'muon.py' in nm and e.get('pid') == 1:
-        tail = nm.split(':')[-1]
-        muon_calls[tail] += 1
-for k, v in muon_calls.most_common(15):
-    print(f"  {v:5d}  {k}")
+    if isinstance(nm, str) and 'muon.py' in nm and e.get('pid') == 1:
+        c[nm.split(':')[-1]] += 1
+for k, v in c.most_common(15): print(f'{v:5d}  {k}')
+"
 ```
-
-Use this to verify a code change actually hit the new code path (count of `_apply_muon_ns_batched` vs `_apply_muon_ns`).
 
 ---
 

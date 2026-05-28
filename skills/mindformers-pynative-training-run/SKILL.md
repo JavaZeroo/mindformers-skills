@@ -12,6 +12,21 @@ If the task is performance optimization (profile reading, optimizer window timin
 
 ---
 
+## Scripts in this skill
+
+Helpers under `scripts/` next to this SKILL.md. They wrap the regex / dict-diff
+work you'd otherwise have to retype every session. When this skill is installed
+globally, the dir lives at `~/.claude/skills/mindformers-pynative-training-run/scripts/`.
+
+| Script | When to use | Example |
+|---|---|---|
+| [`median_per_step.py`](scripts/median_per_step.py) | After a training finishes, to read median/mean/min/max per_step_time and the final loss from `worker_0.log`. Steady-state only (defaults to dropping warmup steps ≤ 50). | `python3 scripts/median_per_step.py output/run/worker_0.log` |
+| [`compare_loss.py`](scripts/compare_loss.py) | To verify an optimization is math-equivalent: diffs per-step loss between two `worker_0.log`s. Emits `bit-identical` for tol=0; otherwise classifies the relative diff (FP-order vs moderate vs real change). | `python3 scripts/compare_loss.py before/worker_0.log after/worker_0.log` |
+
+Both scripts handle the per_step_time log line format (`per_step_time:    535ms`) and the 50-step rolling buffer the loss callback uses.
+
+---
+
 ## TL;DR (90-second version)
 
 ```bash
@@ -138,31 +153,27 @@ The loss callback in this repo logs lines that look like:
 { step:[   53/  250], loss:  11.687554, per_step_time:    535ms, load_balancing_loss:   1.082657, lr: 1.000000e-06, grad_norm:  14.964324, throughput:   6.99T }
 ```
 
-Robust regex (handles variable whitespace, total-step values, and avoids matching unrelated lines via the `per_step_time:` anchor):
+**Use the bundled script — no need to retype the regex every time:**
 
-```python
-import re, statistics
-RE = re.compile(
-    r'step:\[\s*(\d+)/\s*\d+\],\s*loss:\s*([0-9.]+),.*per_step_time:\s*(\d+)ms')
-
-def read(path):
-    rows = {}
-    with open(path) as f:
-        for line in f:
-            m = RE.search(line)
-            if m:
-                rows[int(m.group(1))] = (float(m.group(2)), int(m.group(3)))
-    return rows
-
-new = read("output/.../worker_0.log")
-# Steady-state only — drop the first 50 steps to skip warmup + profiler overhead
-times = [t for s, (_, t) in new.items() if s >= 51]
-print(f"median per_step: {statistics.median(times)} ms")
-print(f"mean   per_step: {statistics.mean(times):.0f} ms")
-print(f"min    per_step: {min(times)} ms")
+```bash
+python3 ${SKILL_DIR}/scripts/median_per_step.py output/.../worker_0.log
 ```
 
-**Important: this repo's loss_callback only emits the LAST 50 steps in the log** (steps 201–250 in a 250-step run). Don't assume earlier loss values are recoverable. Plan benchmark code around this 50-sample window.
+Output:
+
+```
+file:           output/.../worker_0.log
+steps measured: 50  (from step 201 to 250)
+  median per_step: 1386.5 ms
+  mean   per_step: 1780.9 ms
+  min    per_step: 1194 ms
+  max    per_step: 11170 ms
+  final loss @ step 250: 11.591713
+```
+
+`--warmup N` filters out steps `<= N` (default 50). **Important: this repo's loss_callback only emits the LAST 50 steps** (steps 201–250 in a 250-step run); the script's default warmup already accounts for this.
+
+> `${SKILL_DIR}` resolves to `~/.claude/skills/mindformers-pynative-training-run/` when the skill is installed globally. Use the absolute path or `cd` into the skill dir.
 
 ---
 
@@ -170,16 +181,27 @@ print(f"min    per_step: {min(times)} ms")
 
 Used heavily for verifying optimization correctness — same code path → same loss to every decimal:
 
-```python
-old = read("output/run_before/worker_0.log")
-new = read("output/run_after/worker_0.log")
-common = sorted(set(old) & set(new))
-mismatches = [(s, old[s][0], new[s][0]) for s in common if old[s][0] != new[s][0]]
-if not mismatches:
-    print(f"OK — {len(common)} steps bit-identical")
-else:
-    print(f"DIFF — first at step {mismatches[0][0]}: {mismatches[0][1]} vs {mismatches[0][2]}")
+```bash
+python3 ${SKILL_DIR}/scripts/compare_loss.py \
+  output/run_before/worker_0.log \
+  output/run_after/worker_0.log
 ```
+
+Output on a clean optimization (mathematically equivalent):
+
+```
+a:        output/run_before/worker_0.log
+b:        output/run_after/worker_0.log
+common steps: 50  (201..250)
+max abs(a-b): 0.000000e+00
+=> OK — bit-identical (within tol=0.0)
+```
+
+Pass `--tol 1e-5` to permit FP-order round-off (e.g. when comparing across mm→bmm or allreduce reordering changes). The script also auto-classifies the relative diff:
+
+- `max relative diff < 1e-4` → likely FP accumulation order, **math-equivalent**
+- `1e-4 < max rel < 1e-2` → moderate, inspect whether your change touches large reductions
+- `> 1e-2` → likely a real semantic change, verify correctness
 
 **What counts as "equivalent vs broken":**
 - `mm` → `bmm` on Ascend produces ~1e-5 relative round-off difference (different FP accumulation order). Same direction, same convergence. **Equivalent.**
