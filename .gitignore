@@ -1,0 +1,9 @@
+# Python / editor noise — skills repo should only contain SKILL.md files
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+.idea/
+
+# Local skill-install symlink test artifacts (npx skills add ./)
+node_modules/
