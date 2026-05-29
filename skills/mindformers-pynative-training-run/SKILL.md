@@ -1,7 +1,6 @@
 ---
 name: mindformers-pynative-training-run
-description: Walk a user from "I want to train this model" to a running MindFormers pynative job on Ascend NPUs. Covers what inputs to gather (a base yaml, card count via ASCEND_RT_VISIBLE_DEVICES, dataset, optional checkpoint), how to check + fill the yaml's data_path (sample megatron dataset download from PAI-Megatron-Patch is bundled), how parallel dims (TP / EP / CP / PP) are configured in the yaml while DP is auto-derived from card count, the msrun launch command shape, and the launch-time pitfalls (stale tail -F, "step 200 error" masks, HCCL ret:4). Stops at the launch — performance / precision analysis is a separate skill.
-when_to_use: User asks to run / kick off / launch / 跑起来 / 拉起 a MindFormers training, msrun something, or train a yaml in PYNATIVE_MODE (--mode 1); user is starting fresh — "I want to train DeepSeek-V3 / Qwen3 with N cards"; user reports a training failed to start, hung in init, crashed early; the conversation references dp/tp/ep/cp/pp configuration, ASCEND_RT_VISIBLE_DEVICES, BlendedMegatronDatasetDataLoader, data_path, load_path, or run_mindformer.py.
+description: Walk a user from "I want to train this model" to a running MindFormers pynative job on Ascend NPUs. Use when the user asks to run / kick off / launch / 跑起来 / 拉起 MindFormers training, msrun something, direct-python single-card, or train a yaml in PYNATIVE_MODE (--mode 1); when starting DeepSeek-V3 / Qwen3 with N cards; when training failed to start, hung in init, crashed early, or single-card fails while multi-card works; or when the conversation references dp/tp/ep/cp/pp, ASCEND_RT_VISIBLE_DEVICES, BlendedMegatronDatasetDataLoader, data_path, load_path, or run_mindformer.py. Covers base yaml, dataset, optional checkpoint, yaml-first launch edits, TP / EP / CP / PP setup, direct-python single-card launch, multi-card msrun launch, and launch-time / first-step pitfalls (stale tail -F, "step 200 error" masks, HCCL ret:4, single-card collective bugs). Stops at launch; performance / precision analysis is a separate skill.
 ---
 
 # MindFormers Pynative Training: Launch
@@ -51,7 +50,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3            # 4-card job
 export ASCEND_RT_VISIBLE_DEVICES=0                  # single-card debug
 ```
 
-Ask the user how many cards they want to use. Then `--worker_num` and `--local_worker_num` in the msrun command both equal that number for a single-host job.
+Ask the user how many cards they want to use. For multi-card msrun jobs, `--worker_num` and `--local_worker_num` both equal that number for a single-host job. For single-card direct-python jobs, there is no `worker_num`; only set `ASCEND_RT_VISIBLE_DEVICES=0`.
 
 ### 3. Parallel-dim configuration in the yaml (TP / EP / CP / PP)
 
@@ -147,9 +146,48 @@ If `load_path` is set but the dir doesn't exist, training will error at the load
 
 ---
 
+## Launch edits go in the yaml
+
+For pynative launch work, prefer creating or editing a temporary yaml over relying on command-line overrides.
+
+This is especially important for direct-python `--mode 1`: some MindFormers entrypoints jump into the pynative trainer before `--options` is merged, so a command like
+
+```bash
+python run_mindformer.py --config <yaml> --mode 1 --options optimizer.qk_clip_enabled=False
+```
+
+may still run with the yaml's original value. When testing a switch such as `optimizer.comm_strategy`, `optimizer.qk_clip_enabled`, `checkpoint.load_path`, `training.steps`, or `model.num_hidden_layers`, write it into a copy of the yaml and grep the startup log to confirm the printed config.
+
+---
+
 ## Launch
 
-Once the four pre-launch items are settled, the command is mechanical:
+Once the pre-launch items are settled, choose the launch form by card count.
+
+### Single-card launch: direct python
+
+For normal single-card pynative runs, use direct python:
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0
+
+python run_mindformer.py \
+  --config ./<your_yaml> \
+  --mode 1
+```
+
+`msrun --worker_num=1` may also run, but it initializes distributed/HCCL state and can hide bugs that only appear in the true direct-python single-card path. If the user says "single-card bug", "multi-card works but single-card fails", or asks to verify direct single-card behavior, use direct python first.
+
+For long single-card runs, write logs explicitly:
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0
+python run_mindformer.py --config ./<your_yaml> --mode 1 > output/<your_run_label>.log 2>&1
+```
+
+### Multi-card launch: msrun
+
+For multi-card single-host runs, use `msrun`:
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7    # match --worker_num below
@@ -208,11 +246,11 @@ Common point of confusion in the first 30 s: a freshly-started job may not have 
 
 ```bash
 # 1. Process alive?
-pgrep -f "<unique substring from yaml name>" | head -3
+pgrep -af "run_mindformer.py.*<unique substring from yaml name>" | head -3
 # 2. Most recent log activity?
-tail -3 output/<your_run_label>/worker_0.log
+tail -3 output/<your_run_label>.log 2>/dev/null || tail -3 output/<your_run_label>/worker_0.log
 # 3. Has it reached the first optimizer step?
-grep -E "step:\[ +1/" output/<your_run_label>/worker_0.log
+grep -E "step:\[ +1/" output/<your_run_label>.log output/<your_run_label>/worker_0.log 2>/dev/null
 ```
 
 Init typically goes: msrun init → `Building model from config` → (optional) `Loaded checkpoint` → first dataset batch → first `step:[ 1/...]` log line. That can take 30 s – 2 min depending on model size and whether weights are being loaded.
@@ -238,6 +276,23 @@ When a **second** `msrun` reuses the same `--log_dir`, the worker_*.log files ar
 
 ---
 
+## Single-card bug triage
+
+When single-card fails but multi-card works, the goal is to isolate launch mode, model scale, and the feature switch that trips the bug.
+
+1. **Use direct python first.** `msrun --worker_num=1` can initialize distributed groups and mask direct-python single-card issues.
+2. **Shrink the smoke config before debugging logic.** If the full yaml OOMs, reduce `model.num_hidden_layers` (for example to 4), set `checkpoint.load_path: ""`, use `training.steps: 5` or `10`, and set both global/local batch to 1. Keep only the feature under test unchanged.
+3. **Run a small scenario matrix.** Compare direct-python vs msrun, single-card vs multi-card when available, key switches on/off (for example `qk_clip_enabled`), and the relevant `optimizer.comm_strategy` values. Name logs with the matrix dimensions.
+4. **Treat OOM separately.** A 24-layer checkpoint OOM does not prove or disprove a launch/communication bug; first get a reduced config to the first few loss lines.
+5. **Confirm the worktree.** If multiple worktrees or branches exist, check the suspect file's diff in each before trusting a run:
+   ```bash
+   git status --short
+   git diff -- <suspect-file>
+   git -C <other-worktree> diff -- <suspect-file>
+   ```
+
+---
+
 ## Launch-time error signatures
 
 These are the errors you actually hit at launch / first few steps. Mid-training errors (perf regressions, numerical issues) belong in the perf-analysis skill.
@@ -247,6 +302,7 @@ These are the errors you actually hit at launch / first few steps. Mid-training 
 | `Error in training step 200` printed during init (no real steps yet) | The previous run's stale-log tail (see above) | Confirm with `pgrep` + timestamp; if new run alive, ignore the stale event |
 | `Error in training step N` *after* real init logs | Real error — the traceback is several lines **above** this line | Scroll up in `worker_0.log` to find the actual Python exception |
 | `HcomRecv failed, ret:4` + `parameter tag, local ... remote ...` mismatch | HCCL tag-less P2P FIFO mismatch — usually per-rank op reordering bug | Out of scope for launch; see the codebase's HCCL pitfalls notes |
+| `RuntimeError: The HCCL group hccl_world_group does not existed` in direct-python single-card | A collective such as `all_reduce` / `all_gather` ran without a distributed group. `msrun --worker_num=1` may hide it. | Reproduce with direct python on a reduced yaml; inspect the stack for unconditional collectives and guard single-card no-op paths with `get_world_size() > 1` where semantically valid |
 | `AttributeError: '<HSDP...ForCausalLM>' object has no attribute '<method>'` | Wrapper class doesn't auto-forward to GPTModel | Add the forward in `mindformers/parallel_core/utils/model_mixin.py` |
 | `tp * pp * cp does not divide world_size` (or analogous layout error) | Parallel dim mismatch with card count | Recompute: `world_size = len(ASCEND_RT_VISIBLE_DEVICES.split(','))`, then `tp*pp*cp` must divide it |
 | Run "hangs" + `worker_0.log` last line is `Parsing: [###...]` | Profiler post-processing after training completed | Wait — parsing takes 1–3 min for 8 ranks |
@@ -258,18 +314,21 @@ These are the errors you actually hit at launch / first few steps. Mid-training 
 ## Common Bash recipes (launch-time)
 
 ```bash
+LOG=output/<your_run_label>.log                 # direct-python
+LOG=output/<your_run_label>/worker_0.log        # msrun rank 0
+
 # Did the new run actually start? (first real step line)
-grep -m1 "step:\[ +1/" output/<your_run_label>/worker_0.log
+grep -E -m1 "step:\[ +1/" "$LOG"
 
 # Is the run alive?
-pgrep -af "msrun.*<your_yaml>" | head -3
+pgrep -af "run_mindformer.py.*<your_yaml>|msrun.*<your_yaml>" | head -3
 
 # What is rank 0 doing right now?
-grep -v "^$" output/<your_run_label>/worker_0.log | tail -3 | cut -c1-180
+grep -v "^$" "$LOG" | tail -3 | cut -c1-180
 
 # Confirm the parallel layout the run picked
 grep -E "data_parallel|tensor_parallel|expert_parallel|context_parallel|pipeline_parallel" \
-  output/<your_run_label>/worker_0.log | head -10
+  "$LOG" | head -10
 ```
 
 ---
