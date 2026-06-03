@@ -1,4 +1,0 @@
-interface:
-  display_name: "GitCode RFC PR Draft"
-  short_description: "Draft GitCode RFCs and PR bodies."
-  default_prompt: "Create GitCode-ready RFC and PR draft content from the current change, using the repository templates and concise test evidence."

@@ -32,8 +32,7 @@ See the full agent list at <https://skills.sh>.
 |---|---|
 | [`mindformers-pynative-training-run`](skills/mindformers-pynative-training-run/SKILL.md) | Launch / observe MindFormers pynative training. `msrun` command shapes, log + profile dir layout, background-run + Monitor pattern, the stale-`tail -F` gotcha, error-signature lookup. |
 | [`mindformers-pynative-perf-analysis`](skills/mindformers-pynative-perf-analysis/SKILL.md) | Read Ascend MindSpore profile data (`step_trace_time.csv`, `communication.json`, `trace_view.json`, `op_statistic.csv`) and turn it into an actionable next optimization. Bottleneck-classification decision tree included. |
-| [`gitcode-pr-rfc-pipeline`](skills/gitcode-pr-rfc-pipeline/SKILL.md) | Drive GitCode PR/RFC/link/retest/pipeline workflows and export failed MindSpore-Bot stages with OpenLiBing log tails as JSON, without opening the pipeline browser UI. |
-| [`gitcode-rfc-pr-draft`](skills/gitcode-rfc-pr-draft/SKILL.md) | Draft GitCode RFC issue content and PR descriptions from repository templates, diffs, and concise verification evidence. |
+| [`gitcode-pr-rfc-pipeline`](skills/gitcode-pr-rfc-pipeline/SKILL.md) | Draft GitCode PR/RFC bodies, drive PR/RFC/link/retest/pipeline workflows, and export failed MindSpore-Bot stages with OpenLiBing log tails as JSON. |
 
 The two pynative skills are designed to stack: the **training-run** skill is the prerequisite for the
 **perf-analysis** skill (you can't analyze a profile you haven't run yet). Install both for
