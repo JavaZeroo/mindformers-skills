@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitCode PR Gate Log"
+  short_description: "Fetch PR gate failures and logs."
+  default_prompt: "Check a GitCode PR gate from MindSpore-Bot comments and export failed stages with OpenLiBing logs."

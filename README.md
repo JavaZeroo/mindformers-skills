@@ -1,7 +1,7 @@
 # mindformers-skills
 
-Agent skills for **MindFormers pynative training on Ascend** — distilled from real
-performance-optimization work on Muon optimizer / DeepSeek-V3 / 24-layer FSDP setups.
+Agent skills for **MindFormers workflows**, especially pynative training on Ascend and
+GitCode PR gate inspection — distilled from real MindFormers development work.
 
 Designed to be installed via [`skills`](https://skills.sh) so the next agent that opens a MindFormers
 codebase doesn't have to re-derive `msrun` commands, profile-file layouts, or how to
@@ -10,21 +10,20 @@ read `step_trace_time.csv`.
 ## Install
 
 ```bash
-# Install all skills globally for Claude Code
+# Install all skills globally for one agent, for example Claude Code
 npx skills@latest add JavaZeroo/mindformers-skills -g -a claude-code
 
-# Install a specific skill
+# Install this GitCode gate-log skill only
 npx skills@latest add JavaZeroo/mindformers-skills \
-  --skill mindformers-pynative-perf-analysis -g -a claude-code
+  --skill gitcode-pr-gate-log -g -a claude-code
 
 # List available skills without installing
 npx skills@latest add JavaZeroo/mindformers-skills --list
 ```
 
-The CLI symlinks each skill into `~/.claude/skills/`, so `npx skills update` later
-pulls fresh changes from this repo without re-running install.
-
-For other supported agents (Cursor, Codex, OpenCode, …) swap the `-a` flag.
+For other supported agents (Codex, Cursor, OpenCode, …), swap the `-a` value. The
+installer places/symlinks skills into the target agent's own skill directory, so avoid
+hard-coding paths inside skill instructions.
 See the full agent list at <https://skills.sh>.
 
 ## Skills
@@ -33,14 +32,15 @@ See the full agent list at <https://skills.sh>.
 |---|---|
 | [`mindformers-pynative-training-run`](skills/mindformers-pynative-training-run/SKILL.md) | Launch / observe MindFormers pynative training. `msrun` command shapes, log + profile dir layout, background-run + Monitor pattern, the stale-`tail -F` gotcha, error-signature lookup. |
 | [`mindformers-pynative-perf-analysis`](skills/mindformers-pynative-perf-analysis/SKILL.md) | Read Ascend MindSpore profile data (`step_trace_time.csv`, `communication.json`, `trace_view.json`, `op_statistic.csv`) and turn it into an actionable next optimization. Bottleneck-classification decision tree included. |
+| [`gitcode-pr-gate-log`](skills/gitcode-pr-gate-log/SKILL.md) | Check GitCode MindSpore-Bot PR gate tables and export every failed stage with OpenLiBing log tails as JSON, without opening the pipeline browser UI. |
 
-The two skills are designed to stack: the **training-run** skill is the prerequisite for the
+The two pynative skills are designed to stack: the **training-run** skill is the prerequisite for the
 **perf-analysis** skill (you can't analyze a profile you haven't run yet). Install both for
 a full pynative-perf-optimization workflow.
 
 ## Scope
 
-These skills assume:
+The pynative training/perf skills assume:
 
 - **MindFormers** repo, pynative mode (`--mode 1` to `run_mindformer.py`)
 - **Ascend** hardware (HCCL collectives, ASCEND_PROFILER_OUTPUT format)
@@ -51,6 +51,9 @@ These skills assume:
 If you're on a different stack (PyTorch/CUDA, graph mode, single-card debug only) the
 skills will still be useful for the generic "background-run + read worker log" patterns
 but the file-format specifics are Ascend-only.
+
+The `gitcode-pr-gate-log` skill assumes GitCode PR/MR comments from MindSpore-Bot and
+OpenLiBing pipeline detail links.
 
 ## Authoring / contributing
 
