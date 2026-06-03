@@ -24,7 +24,7 @@ OPENLIBING_GATEWAY = "https://www.openlibing.com/gateway/openlibing-cicd"
 OPENLIBING_EXEC_LOG = f"{OPENLIBING_GATEWAY}/project/pipeline/exec-log"
 OPENLIBING_PIPELINE_LOGS = f"{OPENLIBING_GATEWAY}/project/pipeline/logs"
 DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 gitcode-pr-gate-log-cli "
+    "Mozilla/5.0 gitcode-pr-rfc-pipeline-cli "
     "(https://github.com/JavaZeroo/mindformers-skills)"
 )
 

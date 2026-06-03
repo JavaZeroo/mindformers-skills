@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitCode PR RFC Pipeline"
+  short_description: "Automate GitCode PR/RFC gates."
+  default_prompt: "Create or update a GitCode PR/RFC workflow, trigger or poll the pipeline, and fetch failed MindSpore-Bot gate logs as JSON."

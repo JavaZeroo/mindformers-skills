@@ -13,9 +13,9 @@ read `step_trace_time.csv`.
 # Install all skills globally for one agent, for example Claude Code
 npx skills@latest add JavaZeroo/mindformers-skills -g -a claude-code
 
-# Install this GitCode gate-log skill only
+# Install this GitCode PR/RFC/pipeline workflow skill only
 npx skills@latest add JavaZeroo/mindformers-skills \
-  --skill gitcode-pr-gate-log -g -a claude-code
+  --skill gitcode-pr-rfc-pipeline -g -a claude-code
 
 # List available skills without installing
 npx skills@latest add JavaZeroo/mindformers-skills --list
@@ -32,7 +32,8 @@ See the full agent list at <https://skills.sh>.
 |---|---|
 | [`mindformers-pynative-training-run`](skills/mindformers-pynative-training-run/SKILL.md) | Launch / observe MindFormers pynative training. `msrun` command shapes, log + profile dir layout, background-run + Monitor pattern, the stale-`tail -F` gotcha, error-signature lookup. |
 | [`mindformers-pynative-perf-analysis`](skills/mindformers-pynative-perf-analysis/SKILL.md) | Read Ascend MindSpore profile data (`step_trace_time.csv`, `communication.json`, `trace_view.json`, `op_statistic.csv`) and turn it into an actionable next optimization. Bottleneck-classification decision tree included. |
-| [`gitcode-pr-gate-log`](skills/gitcode-pr-gate-log/SKILL.md) | Check GitCode MindSpore-Bot PR gate tables and export every failed stage with OpenLiBing log tails as JSON, without opening the pipeline browser UI. |
+| [`gitcode-pr-rfc-pipeline`](skills/gitcode-pr-rfc-pipeline/SKILL.md) | Drive GitCode PR/RFC/link/retest/pipeline workflows and export failed MindSpore-Bot stages with OpenLiBing log tails as JSON, without opening the pipeline browser UI. |
+| [`gitcode-rfc-pr-draft`](skills/gitcode-rfc-pr-draft/SKILL.md) | Draft GitCode RFC issue content and PR descriptions from repository templates, diffs, and concise verification evidence. |
 
 The two pynative skills are designed to stack: the **training-run** skill is the prerequisite for the
 **perf-analysis** skill (you can't analyze a profile you haven't run yet). Install both for
@@ -52,8 +53,9 @@ If you're on a different stack (PyTorch/CUDA, graph mode, single-card debug only
 skills will still be useful for the generic "background-run + read worker log" patterns
 but the file-format specifics are Ascend-only.
 
-The `gitcode-pr-gate-log` skill assumes GitCode PR/MR comments from MindSpore-Bot and
-OpenLiBing pipeline detail links.
+The `gitcode-pr-rfc-pipeline` skill assumes GitCode PR/MR comments from MindSpore-Bot and
+OpenLiBing pipeline detail links. Its bundled gate-log script can be used independently for
+JSON pass/fail inspection.
 
 ## Authoring / contributing
 
