@@ -2,28 +2,31 @@
 name: gitcode-pr-rfc-pipeline
 description: >-
   Drive the full GitCode contribution workflow via the GitCode REST API:
-  draft PR/RFC bodies from repo templates, open or update pull requests, open
-  RFC issues, link PRs and RFCs, trigger /retest, poll CI labels, and fetch
+  draft PR/issue/RFC bodies from repo templates, open or update pull requests,
+  search candidate issues before creating one, open ordinary or RFC issues,
+  link PRs to issues/RFCs, trigger /retest, poll CI labels, and fetch
   failed MindSpore-Bot OpenLiBing gate logs headlessly via the bundled
-  gitcode_pr_gate_log.py tool. Use when the user asks to 提PR, 提RFC, 关联 PR 和
-  RFC, 触发流水线, /retest, 看流水线过没过, 看门禁日志, 为什么 CI 挂了, or 拉取失败
-  stage 日志 on a gitcode.com repo such as mindspore/mindformers. Requires
-  GITCODE_TOKEN for outward GitCode API actions.
+  gitcode_pr_gate_log.py tool. Use when the user asks to 提PR, 提issue/RFC,
+  关联 PR 和 issue/RFC, 触发流水线, /retest, 看流水线过没过, 看门禁日志,
+  为什么 CI 挂了, or 拉取失败 stage 日志 on a gitcode.com repo such as
+  mindspore/mindformers. Requires GITCODE_TOKEN for outward GitCode API actions.
 ---
 
 # GitCode PR / RFC / Pipeline
 
-Drive a GitCode contribution flow headlessly: draft PR/RFC text, create or update PRs,
-create RFC issues, link them, trigger `/retest`, check the latest full MindSpore-Bot gate,
-and fetch failed-stage OpenLiBing logs without opening the browser UI.
+Drive a GitCode contribution flow headlessly: draft PR/issue/RFC text, create or update
+PRs, search/link existing issues, create ordinary or RFC issues when needed, trigger
+`/retest`, check the latest full MindSpore-Bot gate, and fetch failed-stage OpenLiBing
+logs without opening the browser UI.
 
 **Confirm every outward action** before pushing, creating PRs/issues, patching bodies, or
 posting `/retest`. These actions target shared upstream repos.
 
 ## Quick Decision Tree
 
-- **Draft PR/RFC body only**: read [body-drafting.md](references/body-drafting.md).
-- **Create/update PR, create RFC issue, or link PR ↔ RFC**: read
+- **Draft PR/issue/RFC body only**: read [body-drafting.md](references/body-drafting.md).
+- **Create/update PR, search issue candidates, create issue/RFC, or link PR ↔ issue/RFC**:
+  read
   [gitcode-api-cookbook.md](references/gitcode-api-cookbook.md).
 - **Trigger `/retest`, poll CI, or inspect failed gate logs**: use the gate-log script first,
   then read [ci-polling-and-triage.md](references/ci-polling-and-triage.md) when you need
@@ -32,11 +35,13 @@ posting `/retest`. These actions target shared upstream repos.
 If the task spans multiple areas, use them in this order:
 
 1. Draft body text from repository templates.
-2. Confirm target repo, branch, fork, issue/RFC plan, and token ownership.
-3. Push/create/update/link through the GitCode API.
-4. Trigger `/retest`.
-5. Check the latest full gate with `scripts/gitcode_pr_gate_log.py`.
-6. If failed, inspect `failed_stages[].log.error_excerpt` before changing code.
+2. Confirm target repo, branch, fork, change type, and token ownership.
+3. Before creating any issue/RFC, search candidate issues with
+   `scripts/gitcode_issue_candidates.py` and let the user choose.
+4. Push/create/update/link through the GitCode API.
+5. Trigger `/retest`.
+6. Check the latest full gate with `scripts/gitcode_pr_gate_log.py`.
+7. If failed, inspect `failed_stages[].log.error_excerpt` before changing code.
 
 ## Token Rules
 
@@ -49,6 +54,23 @@ If the task spans multiple areas, use them in this order:
 
 For concrete API commands and token checks, read
 [gitcode-api-cookbook.md](references/gitcode-api-cookbook.md).
+
+## Issue Candidate Script
+
+Use `scripts/gitcode_issue_candidates.py` before creating a new issue or RFC. It is
+read-only and can run without a token for public repositories; if `GITCODE_TOKEN` is set,
+it uses it for authenticated reads.
+
+```bash
+python3 scripts/gitcode_issue_candidates.py mindspore/mindformers \
+  --change-type bugfix --title "<draft PR title>" --keywords Muon optimizer tp --json
+```
+
+The script returns `status`, `candidates[]`, `score`, `reasons`, and `next_action`.
+Show the top candidates to the user and ask whether to link one, create an ordinary
+issue, create an RFC issue, or search again. For bugfix/regression/CI-fix work, do not
+default to RFC; create an ordinary bug issue only after the user confirms no existing
+candidate fits.
 
 ## Gate Log Script
 

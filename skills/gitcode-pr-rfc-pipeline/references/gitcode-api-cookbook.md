@@ -90,9 +90,10 @@ PATCH the body (1d); **skip create (1c)**. Otherwise proceed to create.
   ```
   (e.g. `origin` = `<login>/mindformers`, and `$UP` — often `ms` — = upstream
   `mindspore/mindformers`).
-- **Issue association** — the merge gate needs a linked issue, so decide this NOW, not at
-  Step 2: **ask the user whether to link an existing issue (they give the number) or create
-  a new RFC.** This determines whether Step 2 runs.
+- **Issue association** — the merge gate needs a linked issue, but an issue is not always
+  an RFC. Decide this NOW: first search candidate upstream issues, then ask the user whether
+  to link an existing issue, create an ordinary issue, create an RFC issue, or search again.
+  Bugfix/regression/CI-fix work should not default to RFC.
 - **Scrub AI attribution from commit messages** — no commit going into the PR may mention
   AI/assistant authorship. Scan the range being pushed and strip any such lines:
   ```bash
@@ -150,27 +151,86 @@ curl -s -X PATCH "https://api.gitcode.com/api/v5/repos/mindspore/mindformers/pul
 ```
 Body: reproduce `.gitcode/PULL_REQUEST_TEMPLATE.md` faithfully (keep the `<!-- -->` lines and
 ALL checklist options; just check the right boxes), no local paths, concise inline test
-evidence, honest checkboxes. Use the PR/RFC body drafting section above.
+evidence, honest checkboxes. Use the PR/issue/RFC body drafting section above.
 
 **1e. Verify:** `GET pulls/<NUMBER>` → confirm `head` sha == local HEAD, `base` == master,
 `state` open. Report number + `html_url`.
 
 ---
 
-## Step 2 — Open an RFC issue
+## Step 2 — Find or create the associated issue
 
-Only if Step 1a's decision was "create a new RFC" (otherwise the user already gave an
-existing issue number → skip to Step 3).
+Run this step before creating any issue or RFC. Skip creation if the user chooses an
+existing issue number.
 
-Draft the RFC body from `.gitcode/ISSUE_TEMPLATE/RFC-CN.yml` using the PR/RFC body drafting
+### 2a. Search candidate issues first
+
+Use the bundled read-only script so every agent gets the same JSON shape and relevance
+rules:
+
+```bash
+python3 scripts/gitcode_issue_candidates.py mindspore/mindformers \
+  --change-type bugfix --title "<draft PR title>" --keywords "<module>" "<error>" "<feature>" --json
+```
+
+Show up to 3-5 candidates to the user with number, title, state, URL, score, and reasons.
+Do not silently pick one. If no candidate fits:
+
+- bugfix/regression/CI-fix/test-fix → ask to create an ordinary bug issue.
+- design/API/feature/architecture change → ask whether to create an RFC issue.
+- unclear change type → ask; do not default to RFC.
+
+Raw API fallback when the script is unavailable:
+
+```bash
+curl -sG "https://api.gitcode.com/api/v5/repos/mindspore/mindformers/issues" \
+  --data-urlencode "state=open" \
+  --data-urlencode "labels=bug" \
+  --data-urlencode "search=<keyword>" \
+  --data-urlencode "sort=updated" \
+  --data-urlencode "direction=desc" \
+  --data-urlencode "per_page=20" \
+  --data-urlencode "page=1"
+```
+
+The repository issues API also works without `labels=bug` for non-bug searches. It returns
+pagination counters in headers such as `total_count` and `total_page`; keep the default
+workflow lightweight and search only the best keywords unless the user asks for a broader
+scan.
+
+### 2b. Create an ordinary issue when needed
+
+Use this for bugfix/regression/CI-fix/test-fix/doc/maintenance work after the user confirms
+that no candidate issue fits. Read the repository's issue templates and use the best
+ordinary template; do not use `RFC-CN.yml` for a narrow bugfix.
+
+**Create directly on the upstream org — but DROP `assignee`.** `POST /repos/{org}/issues`
+(owner in path; `repo`+`title`+`body` in body) works. Omit `assignee` /
+`assignee_id` / `assignee_ids`:
+
+```bash
+python - <<'PY'
+import json
+json.dump({"repo":"mindformers","title":"[Bug]: <title>","body":open('/tmp/issue_body.md').read()},
+          open('/tmp/issue_create.json','w'), ensure_ascii=False)     # NO assignee
+PY
+curl -s -X POST "https://api.gitcode.com/api/v5/repos/mindspore/issues" \
+  -H "Authorization: Bearer ${GITCODE_TOKEN}" -H "Content-Type: application/json" \
+  --data-binary @/tmp/issue_create.json | sed -E "s/${GITCODE_TOKEN}/<TOKEN>/g"
+```
+
+Success → `number` (string), `html_url`, `state:"open"`. If label assignment fails or is
+unclear, create without labels and add labels later / in the web UI.
+
+### 2c. Create an RFC issue when needed
+
+Draft the RFC body from `.gitcode/ISSUE_TEMPLATE/RFC-CN.yml` using the PR/issue/RFC body drafting
 section above (title prefix `[RFC] `; sections 基本信息 / 概述 / 用例分析 / 方案设计 /
 测试设计 / 缺点与风险 / 现有技术 / 未解决问题; put `!<pr>` in "相关 Issue/PR" for the
 reverse link).
 
-**Create directly on the upstream org — but DROP `assignee`.** `POST /repos/{org}/issues`
-(owner in path; `repo`+`title`+`body` in body) works. The earlier
-`403 "apig token has not permission to request url"` was NOT a scope/membership problem —
-it was caused by sending **`assignee` / `assignee_id` / `assignee_ids`**. Omit those:
+Use this only for design/API/feature/architecture work where an RFC is appropriate. Use the
+same issue creation endpoint and still omit `assignee` / `assignee_id` / `assignee_ids`:
 ```bash
 python - <<'PY'
 import json
@@ -184,7 +244,8 @@ curl -s -X POST "https://api.gitcode.com/api/v5/repos/mindspore/issues" \
 - Success → `number` (string), `html_url`, `state:"open"`.
 - `labels` (e.g. `kind/rfc`) not retested with the working POST; if it 403s, create without
   it and add the label later / in the web UI.
-- **Edit** (fill/fix body): `PATCH /repos/{org}/issues/<NUMBER>` with `{repo,title,body}`.
+- For any issue created in 2b/2c, **edit** (fill/fix body):
+  `PATCH /repos/{org}/issues/<NUMBER>` with `{repo,title,body}`.
 - **Close:** `PATCH /repos/{org}/issues/<NUMBER>` `{"repo":"mindformers","state":"close"}` —
   value is `close` (not `closed`); key is `state` (not `state_event`). Reopen with `reopen`.
 - Verify with `GET /repos/{org}/{repo}/issues/<NUMBER>`.
@@ -194,7 +255,7 @@ you fill it via the PATCH above.)
 
 ---
 
-## Step 3 — Link PR ↔ RFC
+## Step 3 — Link PR ↔ issue/RFC
 
 Put `Fixes #<n>` + the issue URL into the PR's "关联 Issue" section. Same-repo `#<n>` (PR
 and issue both upstream) creates the association and auto-closes the issue on merge. Fetch
@@ -215,6 +276,8 @@ curl -s -X PATCH "https://api.gitcode.com/api/v5/repos/mindspore/mindformers/pul
   -H "Authorization: Bearer ${GITCODE_TOKEN}" -H "Content-Type: application/json" \
   --data-binary @/tmp/pr_link.json | sed -E "s/${GITCODE_TOKEN}/<TOKEN>/g"
 ```
-The RFC body's "相关 Issue/PR" should already carry `!<pr>` for the reverse direction.
+If the chosen issue is an RFC, the RFC body's "相关 Issue/PR" should already carry `!<pr>`
+for the reverse direction. Ordinary bug/doc/test issues do not require that reverse RFC
+field.
 
 ---
