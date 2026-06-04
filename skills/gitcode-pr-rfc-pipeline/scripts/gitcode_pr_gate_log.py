@@ -195,6 +195,9 @@ def log_payload(params: dict[str, str], include_exec_ids: bool, limit: int) -> d
     return body
 
 
+LINT_DIAGNOSTIC_RE = re.compile(r"\b[\w./\\-]+\.py:\d+:\d+:\s+[A-Z]\d{4}:")
+
+
 def extract_error_excerpt(log_text: str, max_lines: int = 80) -> list[str]:
     keywords = (
         "assertionerror",
@@ -209,14 +212,30 @@ def extract_error_excerpt(log_text: str, max_lines: int = 80) -> list[str]:
         "\u5931\u8d25",
         "\u9519\u8bef",
     )
-    lines = []
-    for line in log_text.splitlines():
+    section_markers = (
+        ">>> general linter failure",
+        "context:",
+        "stderr:",
+        "stdout:",
+    )
+    lines = log_text.splitlines()
+    selected_indexes: set[int] = set()
+
+    def add_window(start: int, after: int = 10) -> None:
+        for idx in range(start, min(len(lines), start + after + 1)):
+            if lines[idx].strip():
+                selected_indexes.add(idx)
+
+    for idx, line in enumerate(lines):
         lower = line.lower()
         if any(keyword in lower for keyword in keywords):
-            lines.append(line)
-        if len(lines) >= max_lines:
-            break
-    return lines
+            selected_indexes.add(idx)
+        if any(marker in lower for marker in section_markers):
+            add_window(idx)
+        if "************* module " in lower or LINT_DIAGNOSTIC_RE.search(line):
+            selected_indexes.add(idx)
+
+    return [lines[idx] for idx in sorted(selected_indexes)[:max_lines]]
 
 
 def has_exec_log_params(stage: dict[str, Any]) -> bool:
