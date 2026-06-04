@@ -11,6 +11,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -47,6 +48,55 @@ STOPWORDS = {
     "优化",
     "修改",
 }
+
+
+@dataclass
+class GitCodeClient:
+    """Small GitCode API client for read-only issue discovery."""
+
+    token: str = field(default_factory=lambda: os.environ.get("GITCODE_TOKEN", "").strip())
+    api_base: str = API_BASE
+    user_agent: str = DEFAULT_USER_AGENT
+    timeout: int = 30
+
+    def headers(self) -> dict[str, str]:
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": self.user_agent,
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
+
+    def get_json(self, path: str, params: dict[str, str]) -> tuple[Any, dict[str, str]]:
+        url = f"{self.api_base.rstrip('/')}/{path.lstrip('/')}?{urllib.parse.urlencode(params)}"
+        request = urllib.request.Request(url, headers=self.headers())
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                payload = response.read().decode("utf-8", errors="replace")
+                headers = {key.lower(): value for key, value in response.headers.items()}
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"GitCode API failed: HTTP {exc.code} {detail[:500]}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"GitCode API failed: {exc}") from exc
+
+        if not payload.strip():
+            return [], headers
+        return json.loads(payload), headers
+
+    def repo_issues(
+        self,
+        owner: str,
+        repo: str,
+        params: dict[str, str],
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        data, headers = self.get_json(f"/repos/{owner}/{repo}/issues", params)
+        if isinstance(data, list):
+            return data, headers
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            return data["items"], headers
+        raise RuntimeError(f"unexpected GitCode issue response shape: {type(data).__name__}")
 
 
 def configure_stdio() -> None:
@@ -111,48 +161,6 @@ def normalize_keywords(args: argparse.Namespace) -> list[str]:
             if len(keywords) >= args.max_queries:
                 return keywords
     return keywords
-
-
-def auth_headers() -> dict[str, str]:
-    token = os.environ.get("GITCODE_TOKEN", "").strip()
-    if not token:
-        return {}
-    return {"Authorization": f"Bearer {token}"}
-
-
-def fetch_repo_issues(
-    owner: str,
-    repo: str,
-    *,
-    params: dict[str, str],
-    timeout: int,
-) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    query = urllib.parse.urlencode(params)
-    url = f"{API_BASE}/repos/{owner}/{repo}/issues?{query}"
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": DEFAULT_USER_AGENT,
-        **auth_headers(),
-    }
-    request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = response.read().decode("utf-8", errors="replace")
-            response_headers = {key.lower(): value for key, value in response.headers.items()}
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"GitCode issue search failed: HTTP {exc.code} {detail[:500]}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"GitCode issue search failed: {exc}") from exc
-
-    if not payload.strip():
-        return [], response_headers
-    data = json.loads(payload)
-    if isinstance(data, list):
-        return data, response_headers
-    if isinstance(data, dict) and isinstance(data.get("items"), list):
-        return data["items"], response_headers
-    raise RuntimeError(f"unexpected GitCode issue response shape: {type(data).__name__}")
 
 
 def label_names(issue: dict[str, Any]) -> list[str]:
@@ -324,11 +332,12 @@ def find_candidates(args: argparse.Namespace) -> dict[str, Any]:
     change_type = args.change_type.casefold()
     keywords = normalize_keywords(args)
     requests = unique_requests(keywords, change_type, args.state, args.per_page, args.pages)
+    client = GitCodeClient(timeout=args.timeout)
 
     issues_by_key: dict[str, dict[str, Any]] = {}
     headers_seen: list[dict[str, str]] = []
     for params in requests:
-        issues, headers = fetch_repo_issues(owner, repo, params=params, timeout=args.timeout)
+        issues, headers = client.repo_issues(owner, repo, params)
         headers_seen.append(
             {
                 "search": params.get("search", ""),
