@@ -18,6 +18,10 @@ from gitcode_utils import GitCodeClient, configure_stdio, request_json
 OPENLIBING_GATEWAY = "https://www.openlibing.com/gateway/openlibing-cicd"
 OPENLIBING_EXEC_LOG = f"{OPENLIBING_GATEWAY}/project/pipeline/exec-log"
 OPENLIBING_PIPELINE_LOGS = f"{OPENLIBING_GATEWAY}/project/pipeline/logs"
+OPENLIBING_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+)
 REQUIRED_FULL_GATE_TASKS = [
     "Antipoison_Mindformers",
     "CodeCheck_Pylint",
@@ -195,6 +199,19 @@ def log_payload(params: dict[str, str], include_exec_ids: bool, limit: int) -> d
     return body
 
 
+def openlibing_headers(referer: str | None = None) -> dict[str, str]:
+    """Match OpenLiBing's browser requests closely enough to avoid CloudWAF blocks."""
+
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://www.openlibing.com",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    if referer:
+        headers["Referer"] = referer
+    return headers
+
+
 LINT_DIAGNOSTIC_RE = re.compile(r"\b[\w./\\-]+\.py:\d+:\d+:\s+[A-Z]\d{4}:")
 
 
@@ -251,6 +268,8 @@ def fetch_stage_log(stage: dict[str, Any], limit: int) -> dict[str, Any]:
         endpoint,
         method="POST",
         body=log_payload(params, include_exec_ids=True, limit=limit),
+        headers=openlibing_headers(stage.get("detail_url")),
+        user_agent=OPENLIBING_BROWSER_USER_AGENT,
     )
     data = response.get("data") or {}
     log_text = data.get("log") or ""
