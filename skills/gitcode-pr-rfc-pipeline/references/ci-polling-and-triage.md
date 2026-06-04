@@ -96,8 +96,10 @@ python3 "$GATE" mindspore/mindformers#<PR> --json --output /tmp/gate-log.json \
   | sed -E "s/${GITCODE_TOKEN}/<TOKEN>/g"
 ```
 Read `/tmp/gate-log.json`: `status`, `message`, `all_passed` (true only when every required
-full-gate row is explicitly a pass), and `failed_stages[]`, each with `log.text` (tail) and
-`log.error_excerpt` (lines matching common failure keywords — start here). Notes:
+full-gate row is explicitly a pass), and `failed_stages[]`, each with `log.text` (raw log
+tail, source of truth), `log.error_excerpt` (heuristic lines matching common failure
+patterns), and `log.excerpt_is_heuristic: true`. Start with the excerpt, then verify against
+`log.text` before reporting a root cause or changing code. Notes:
 - `status:"ok"` means a full `PR-pipeline_Mindformers` gate comment was selected.
 - `status:"no_full_gate_comment_found"` means recent comments only contain non-full pipelines
   (for example codecheck-only) or no full gate has been posted yet; do not treat this as pass.

@@ -264,6 +264,7 @@ def fetch_stage_log(stage: dict[str, Any], limit: int) -> dict[str, Any]:
         "end_offset": data.get("end_offset"),
         "text": log_text,
         "error_excerpt": extract_error_excerpt(log_text),
+        "excerpt_is_heuristic": True,
     }
 
 
@@ -278,6 +279,7 @@ def log_fetch_error(stage: dict[str, Any], exc: Exception) -> dict[str, Any]:
         "end_offset": None,
         "text": "",
         "error_excerpt": [],
+        "excerpt_is_heuristic": True,
         "fetch_error": str(exc),
         "detail_url": stage.get("detail_url"),
     }
@@ -304,6 +306,7 @@ def derived_aggregate_log(source_stages: list[dict[str, Any]]) -> dict[str, Any]
         "end_offset": None,
         "text": combined_text,
         "error_excerpt": extract_error_excerpt(combined_text),
+        "excerpt_is_heuristic": True,
         "source_failed_tasks": [
             {
                 "stage": stage["stage"],

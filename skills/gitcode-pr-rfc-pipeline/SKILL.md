@@ -41,7 +41,8 @@ If the task spans multiple areas, use them in this order:
 4. Push/create/update/link through the GitCode API.
 5. Trigger `/retest`.
 6. Check the latest full gate with `scripts/gitcode_pr_gate_log.py`.
-7. If failed, inspect `failed_stages[].log.error_excerpt` before changing code.
+7. If failed, inspect `failed_stages[].log.error_excerpt` first, then confirm with
+   `failed_stages[].log.text` before changing code.
 
 ## Token Rules
 
@@ -92,6 +93,8 @@ The script:
 - returns `status`, `message`, `all_passed`, `missing_required_stages`, `stages`, and
   `failed_stages`;
 - fetches failed task logs directly from OpenLiBing gateway APIs when `--no-logs` is not set.
+  In JSON, `failed_stages[].log.text` is the raw log source of truth;
+  `failed_stages[].log.error_excerpt` is only a heuristic convenience summary.
 
 Important statuses:
 
@@ -113,7 +116,9 @@ Useful flags:
 
 A red gate is not always caused by the current code change. Before editing code:
 
-- Prefer `failed_stages[].log.error_excerpt` over full logs.
+- Start with `failed_stages[].log.error_excerpt`, but treat it as heuristic. If it is empty,
+  generic, or suspicious, read `failed_stages[].log.text`; use the raw log as the final
+  source of truth.
 - Fix only when the log points to this change: touched-file lint, relevant UT, import/compile
   error from the diff.
 - For infra-like failures, flaky unrelated tests, or missing full gate comments shortly after
