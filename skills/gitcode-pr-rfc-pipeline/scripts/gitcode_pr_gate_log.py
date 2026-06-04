@@ -272,12 +272,12 @@ def parse_mr(value: str) -> tuple[str, str, str]:
     if value.startswith(("http://", "https://")):
         parsed = urllib.parse.urlsplit(value)
         parts = [part for part in parsed.path.split("/") if part]
-        for marker in ("merge_requests", "pulls"):
+        for marker in ("merge_requests", "pulls", "pull"):
             if marker in parts:
                 idx = parts.index(marker)
                 if idx >= 2 and idx + 1 < len(parts):
                     return parts[idx - 2], parts[idx - 1], parts[idx + 1]
-        raise ValueError("URL must look like https://gitcode.com/owner/repo/merge_requests/8310")
+        raise ValueError("URL must look like https://gitcode.com/owner/repo/pull/8310")
 
     match = re.fullmatch(r"([^/\s]+)/([^#!\s]+)[#!](\d+)", value)
     if match:
