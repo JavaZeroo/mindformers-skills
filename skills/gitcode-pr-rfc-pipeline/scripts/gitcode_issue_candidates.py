@@ -5,22 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-
-API_BASE = "https://api.gitcode.com/api/v5"
-DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 gitcode-issue-candidates-cli "
-    "(https://github.com/JavaZeroo/mindformers-skills)"
-)
+from gitcode_utils import GitCodeClient, configure_stdio, parse_repo
 
 BUGLIKE_TYPES = {"bug", "bugfix", "fix", "regression", "ci-fix", "test-fix", "hotfix"}
 RFCLIKE_TYPES = {"rfc", "design", "api", "feature", "feat", "architecture"}
@@ -48,83 +38,6 @@ STOPWORDS = {
     "优化",
     "修改",
 }
-
-
-@dataclass
-class GitCodeClient:
-    """Small GitCode API client for read-only issue discovery."""
-
-    token: str = field(default_factory=lambda: os.environ.get("GITCODE_TOKEN", "").strip())
-    api_base: str = API_BASE
-    user_agent: str = DEFAULT_USER_AGENT
-    timeout: int = 30
-
-    def headers(self) -> dict[str, str]:
-        headers = {
-            "Accept": "application/json",
-            "User-Agent": self.user_agent,
-        }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        return headers
-
-    def get_json(self, path: str, params: dict[str, str]) -> tuple[Any, dict[str, str]]:
-        url = f"{self.api_base.rstrip('/')}/{path.lstrip('/')}?{urllib.parse.urlencode(params)}"
-        request = urllib.request.Request(url, headers=self.headers())
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                payload = response.read().decode("utf-8", errors="replace")
-                headers = {key.lower(): value for key, value in response.headers.items()}
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"GitCode API failed: HTTP {exc.code} {detail[:500]}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"GitCode API failed: {exc}") from exc
-
-        if not payload.strip():
-            return [], headers
-        return json.loads(payload), headers
-
-    def repo_issues(
-        self,
-        owner: str,
-        repo: str,
-        params: dict[str, str],
-    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
-        data, headers = self.get_json(f"/repos/{owner}/{repo}/issues", params)
-        if isinstance(data, list):
-            return data, headers
-        if isinstance(data, dict) and isinstance(data.get("items"), list):
-            return data["items"], headers
-        raise RuntimeError(f"unexpected GitCode issue response shape: {type(data).__name__}")
-
-
-def configure_stdio() -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-
-def parse_repo(value: str) -> tuple[str, str]:
-    raw = value.strip()
-    if not raw:
-        raise ValueError("repository is empty")
-
-    if raw.startswith("git@"):
-        raw = raw.split(":", 1)[-1]
-    elif "://" in raw:
-        parsed = urllib.parse.urlsplit(raw)
-        raw = parsed.path
-
-    raw = raw.strip("/")
-    if raw.endswith(".git"):
-        raw = raw[:-4]
-
-    parts = [part for part in raw.split("/") if part]
-    if len(parts) < 2:
-        raise ValueError(f"cannot parse repository from: {value!r}")
-    return parts[0], parts[1]
 
 
 def split_words(text: str) -> list[str]:

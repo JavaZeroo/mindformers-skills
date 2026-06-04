@@ -5,28 +5,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
-import shutil
-import subprocess
 import sys
-import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+from gitcode_utils import GitCodeClient, configure_stdio, request_json
 
-COMMENTS_API = "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/pulls/{iid}/comments"
+
 OPENLIBING_GATEWAY = "https://www.openlibing.com/gateway/openlibing-cicd"
 OPENLIBING_EXEC_LOG = f"{OPENLIBING_GATEWAY}/project/pipeline/exec-log"
 OPENLIBING_PIPELINE_LOGS = f"{OPENLIBING_GATEWAY}/project/pipeline/logs"
-DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 gitcode-pr-rfc-pipeline-cli "
-    "(https://github.com/JavaZeroo/mindformers-skills)"
-)
 REQUIRED_FULL_GATE_TASKS = [
     "Antipoison_Mindformers",
     "CodeCheck_Pylint",
@@ -79,193 +70,6 @@ class GateCommentParser(HTMLParser):
             if self._anchor["href"]:
                 self.links.append(self._anchor)
             self._anchor = None
-
-
-def configure_stdio() -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-
-def append_query(url: str, params: dict[str, str]) -> str:
-    parsed = urllib.parse.urlsplit(url)
-    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    query.extend(params.items())
-    return urllib.parse.urlunsplit(
-        (
-            parsed.scheme,
-            parsed.netloc,
-            parsed.path,
-            urllib.parse.urlencode(query),
-            parsed.fragment,
-        )
-    )
-
-
-def request_json(
-    url: str,
-    *,
-    method: str = "GET",
-    body: dict[str, Any] | None = None,
-    headers: dict[str, str] | None = None,
-    timeout: int = 45,
-) -> Any:
-    data = None
-    req_headers = {
-        "Accept": "application/json",
-        "User-Agent": DEFAULT_USER_AGENT,
-        **(headers or {}),
-    }
-    if body is not None:
-        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        req_headers["Content-Type"] = "application/json"
-
-    req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
-    last_error: Exception | None = None
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-            return json.loads(raw)
-        except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                raise
-            last_error = exc
-            if exc.code in (418, 429, 502, 503, 504) and attempt < 2:
-                time.sleep(1 + attempt)
-                continue
-            break
-        except urllib.error.URLError as exc:
-            last_error = exc
-            if attempt < 2:
-                time.sleep(1 + attempt)
-                continue
-            break
-
-    if contains_secret(url, req_headers):
-        raise RuntimeError(
-            f"request failed for {redact_url(url)}: {last_error}; "
-            "curl fallback skipped because the request contains credentials"
-        )
-
-    try:
-        return curl_json(url, method=method, body=body, headers=req_headers, timeout=timeout)
-    except Exception as curl_error:  # noqa: BLE001
-        raise RuntimeError(
-            f"request failed for {redact_url(url)}: {last_error}; "
-            f"curl fallback failed: {curl_error}"
-        ) from curl_error
-
-
-def redact_url(url: str) -> str:
-    parsed = urllib.parse.urlsplit(url)
-    query = []
-    for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
-        if "token" in key.lower():
-            value = "<redacted>"
-        query.append((key, value))
-    return urllib.parse.urlunsplit(
-        (
-            parsed.scheme,
-            parsed.netloc,
-            parsed.path,
-            urllib.parse.urlencode(query),
-            parsed.fragment,
-        )
-    )
-
-
-def contains_secret(url: str, headers: dict[str, str]) -> bool:
-    parsed = urllib.parse.urlsplit(url)
-    for key, _value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
-        if "token" in key.lower():
-            return True
-    for key in headers:
-        if key.lower() in {"authorization", "private-token"}:
-            return True
-    return False
-
-
-def curl_json(
-    url: str,
-    *,
-    method: str,
-    body: dict[str, Any] | None,
-    headers: dict[str, str],
-    timeout: int,
-) -> Any:
-    curl = shutil.which("curl")
-    if not curl:
-        raise RuntimeError("curl executable not found")
-
-    cmd = [
-        curl,
-        "-sS",
-        "-L",
-        "--connect-timeout",
-        "20",
-        "--max-time",
-        str(timeout),
-        "-w",
-        "\n%{http_code}",
-    ]
-    if method != "GET":
-        cmd.extend(["-X", method])
-    for key, value in headers.items():
-        cmd.extend(["-H", f"{key}: {value}"])
-
-    input_data = None
-    if body is not None:
-        input_data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        cmd.extend(["--data-binary", "@-"])
-    cmd.append(url)
-
-    proc = subprocess.run(
-        cmd,
-        input=input_data,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    stdout = proc.stdout.decode("utf-8", errors="replace")
-    stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-    if proc.returncode != 0:
-        raise RuntimeError(f"curl exited {proc.returncode}: {stderr}")
-    if "\n" not in stdout:
-        raise RuntimeError("curl output did not include HTTP status")
-    raw_body, status_text = stdout.rsplit("\n", 1)
-    status = int(status_text.strip() or "0")
-    if status >= 400:
-        raise RuntimeError(f"HTTP {status}: {raw_body[:500]}")
-    return json.loads(raw_body)
-
-
-def request_gitcode_comments(url: str, token: str | None) -> list[dict[str, Any]]:
-    attempts: list[tuple[str, dict[str, str]]] = [(url, {})]
-    if token:
-        attempts = [
-            (url, {"Authorization": f"Bearer {token}"}),
-            (url, {"Authorization": f"token {token}"}),
-            (url, {"PRIVATE-TOKEN": token}),
-            (append_query(url, {"access_token": token}), {}),
-            (url, {}),
-        ]
-
-    last_error: Exception | None = None
-    for attempt_url, headers in attempts:
-        try:
-            data = request_json(attempt_url, headers=headers)
-            if not isinstance(data, list):
-                raise RuntimeError("GitCode comments response is not a list")
-            return data
-        except urllib.error.HTTPError as exc:
-            last_error = exc
-            if exc.code not in (401, 403, 418):
-                raise
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-    raise RuntimeError(f"failed to fetch GitCode comments: {last_error}")
 
 
 def parse_mr(value: str) -> tuple[str, str, str]:
@@ -501,11 +305,13 @@ def build_report(
     strict_log_fetch: bool,
 ) -> dict[str, Any]:
     owner, repo, iid = parse_mr(mr_arg)
-    comments_url = append_query(
-        COMMENTS_API.format(owner=owner, repo=repo, iid=iid),
+    client = GitCodeClient()
+    comments, comments_url = client.pull_comments(
+        owner,
+        repo,
+        iid,
         {"per_page": "100", "direction": "desc"},
     )
-    comments = request_gitcode_comments(comments_url, os.getenv("GITCODE_TOKEN"))
     runs = extract_gate_runs(comments)
     if not runs:
         return empty_report(
