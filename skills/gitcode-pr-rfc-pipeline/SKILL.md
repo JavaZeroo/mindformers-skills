@@ -338,33 +338,11 @@ Within ~1 min `MindSpore-Bot` posts pipeline URLs (`openlibing.com/.../pipelineD
 the PR gains `ci-pipeline-running` (+ `SC-RUNNING`). A new push usually also re-triggers it.
 
 **A 200 on the comment POST does NOT mean CI started.** `/retest` is best-effort and silently
-no-ops sometimes (bot lag, comment not recognized, no pipeline picked up). The ONLY proof it
-worked is the **bot's pipeline comment appearing** (its `openlibing.com/.../pipelineDetail`
-URL) — equivalently the `ci-pipeline-running` label. So treat triggering as confirm-or-retry,
-not fire-and-forget:
-A busy PR (many `/retest` rounds) easily exceeds 100 comments, and the page you want is the
-*newest* one — so **walk pages to the last one**, don't just grab `per_page=100` (the first
-page is the oldest). This `latest_bot_comments` helper is reused by the failure-finder below:
-```bash
-# after POSTing /retest, give it ~60–90s, then check for the bot pipeline comment:
-python - <<'PY'
-import os,json,urllib.request
-tok=os.environ["GITCODE_TOKEN"]; PR="<PR>"
-base="https://api.gitcode.com/api/v5/repos/mindspore/mindformers/pulls/%s/comments"%PR
-cs=[]; p=1
-while True:                                   # page until a short page (we have them all)
-    page=json.load(urllib.request.urlopen("%s?access_token=%s&per_page=100&page=%d"%(base,tok,p)))
-    cs+=page
-    if len(page)<100: break
-    p+=1
-bot=[c for c in cs if (c.get('user') or {}).get('login')=='MindSpore-Bot']
-hit=[c for c in bot if 'pipelineDetail' in (c.get('body') or '')]
-print('CI TRIGGERED' if hit else 'NOT TRIGGERED — re-post /retest')
-PY
-```
-If still "NOT TRIGGERED" after the wait, re-post `/retest` (up to ~3 tries). Only once the
-pipeline comment / `ci-pipeline-running` shows do you move on to polling labels below — don't
-start counting a green/fail verdict before CI has provably started.
+no-ops sometimes (bot lag, comment not recognized, no pipeline picked up). The proof is either
+the `ci-pipeline-running` label or a new full `PR-pipeline_Mindformers` bot comment. Do not
+manually browse or paginate comments; use the bundled gate-log script below when you need the
+latest full gate state. If it reports `no_full_gate_comment_found` shortly after `/retest`,
+wait 60–90 seconds and retry `/retest` at most a few times.
 
 **Pipeline stages** (all must pass for the `ci-pipeline-passed` label): Antipoison →
 **CodeCheck_Pylint** → SCA → **UT_Mindformers**. A later stage only runs if earlier ones pass.
@@ -428,14 +406,13 @@ asynchronously instead. Pick the mechanism that fits how the agent was invoked:
   terminal label appears.
 Either way: cap the rounds (~30), report the final label, never loop forever.
 
-**On failure, find which stage AND fetch its log — use the bundled gate-log tool.** It parses
-the MindSpore-Bot gate comment's hidden HTML links (`projectId`/`pipelineId`/`pipelineRunId`/
-`jobRunId`/`stepRunId`) and fetches the failed-stage logs **directly from the OpenLiBing
-gateway APIs** — so the per-step detail log that used to be unreachable (JS micro-frontend +
-login) is now fetchable headlessly: no browser scrape, no asking the user to paste. Stdlib
-only; reads `GITCODE_TOKEN` from the env (never pass the token as an arg). Resolve the script
-relative to the loaded `SKILL.md`; do not hard-code a Claude, Codex, Cursor, or OpenCode
-install path:
+**On failure, find which stage AND fetch its log — use the bundled gate-log tool.** It selects
+the latest full `PR-pipeline_Mindformers` bot comment, ignores codecheck-only pipeline comments,
+parses the hidden OpenLiBing links (`projectId`/`pipelineId`/`pipelineRunId`/`jobRunId`/
+`stepRunId`), and fetches failed-stage logs **directly from the OpenLiBing gateway APIs**.
+No browser scrape, no asking the user to paste logs. Stdlib only; reads `GITCODE_TOKEN` from
+the env (never pass the token as an arg). Resolve the script relative to the loaded `SKILL.md`;
+do not hard-code a Claude, Codex, Cursor, or OpenCode install path:
 ```bash
 : "${GITCODE_TOKEN:?token missing}"
 GATE=<path-to-this-skill>/scripts/gitcode_pr_gate_log.py
@@ -445,16 +422,17 @@ python3 "$GATE" mindspore/mindformers#<PR> --summary | sed -E "s/${GITCODE_TOKEN
 python3 "$GATE" mindspore/mindformers#<PR> --json --output /tmp/gate-log.json \
   | sed -E "s/${GITCODE_TOKEN}/<TOKEN>/g"
 ```
-Read `/tmp/gate-log.json`: `all_passed` (true only when every row is explicitly a pass —
-unknown statuses count as not-passed), and `failed_stages[]`, each with `log.text` (tail) and
+Read `/tmp/gate-log.json`: `status`, `message`, `all_passed` (true only when every required
+full-gate row is explicitly a pass), and `failed_stages[]`, each with `log.text` (tail) and
 `log.error_excerpt` (lines matching common failure keywords — start here). Notes:
+- `status:"ok"` means a full `PR-pipeline_Mindformers` gate comment was selected.
+- `status:"no_full_gate_comment_found"` means recent comments only contain non-full pipelines
+  (for example codecheck-only) or no full gate has been posted yet; do not treat this as pass.
 - Aggregate `pipeline` rows carry no `jobRunId`/`stepRunId`; their log is
   `derived-from-failed-stage-logs` — read the failed *child task* rows for the real cause.
-- `--run-index N` selects an older gate comment (latest is `0`); `--fail-on-gate-fail` exits
-  non-zero on any failed stage (handy for a one-shot pass/fail check or CI scripting — note the
-  label poll loop above uses `curl` on labels, not this tool); `--strict-log-fetch` turns a flaky
-  OpenLiBing fetch into a hard error instead of a per-stage `log.fetch_error`; `--no-logs` is
-  table-only.
+- `--fail-on-gate-fail` exits non-zero on any failed or incomplete full gate; `--strict-log-fetch`
+  turns a flaky OpenLiBing fetch into a hard error instead of a per-stage `log.fetch_error`;
+  `--no-logs` is table-only.
 - If OpenLiBing is down, the stage table still parses: you keep the pass/fail verdict and get
   `log.fetch_error` per stage rather than losing the whole report.
 
@@ -511,7 +489,8 @@ pipeline; those require people.
   a PATCH (body / state / link) actually took, re-`GET` the resource; don't trust the PATCH
   response payload.
 - **`scripts/gitcode_pr_gate_log.py`** (bundled): headless gate-log fetcher used in Step 4.
-  Stdlib-only, reads `GITCODE_TOKEN` from env, `--json`/`--summary`/`--no-logs`/`--run-index`/
-  `--fail-on-gate-fail`/`--strict-log-fetch`. It reads gate state from the MindSpore-Bot
-  comment's hidden OpenLiBing links (not the rendered micro-frontend), so it returns before the
-  page would render. Prefer JSON output for automation; redact the token in any echoed output.
+  Stdlib-only, reads `GITCODE_TOKEN` from env, `--json`/`--summary`/`--no-logs`/
+  `--fail-on-gate-fail`/`--strict-log-fetch`. It reads the latest full gate state from the
+  MindSpore-Bot comment's hidden OpenLiBing links (not the rendered micro-frontend), so it
+  returns before the page would render. Prefer JSON output for automation; redact the token in
+  any echoed output.

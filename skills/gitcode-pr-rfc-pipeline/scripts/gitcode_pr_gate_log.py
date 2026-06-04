@@ -27,6 +27,13 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 gitcode-pr-rfc-pipeline-cli "
     "(https://github.com/JavaZeroo/mindformers-skills)"
 )
+REQUIRED_FULL_GATE_TASKS = [
+    "Antipoison_Mindformers",
+    "CodeCheck_Pylint",
+    "SCA_Mindformers",
+    "UT_Mindformers",
+    "PR-pipeline_Mindformers",
+]
 
 
 class GateCommentParser(HTMLParser):
@@ -356,10 +363,19 @@ def extract_gate_runs(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return runs
 
 
-def select_run(runs: list[dict[str, Any]], run_index: int) -> dict[str, Any]:
-    if run_index < 0 or run_index >= len(runs):
-        raise RuntimeError(f"run index {run_index} out of range; found {len(runs)} gate comment(s)")
-    return runs[run_index]
+def is_full_gate_run(run: dict[str, Any]) -> bool:
+    pipeline = (run.get("pipeline") or "").strip()
+    if not re.fullmatch(r"PR-pipeline_Mindformers(?:#\d+)?", pipeline):
+        return False
+    tasks = {stage["task"] for stage in run.get("stages", [])}
+    return any(task != "PR-pipeline_Mindformers" for task in tasks)
+
+
+def select_latest_full_gate_run(runs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for run in runs:
+        if is_full_gate_run(run):
+            return run
+    return None
 
 
 def log_payload(params: dict[str, str], include_exec_ids: bool, limit: int) -> dict[str, Any]:
@@ -481,7 +497,6 @@ def build_report(
     mr_arg: str,
     *,
     limit: int,
-    run_index: int,
     no_logs: bool,
     strict_log_fetch: bool,
 ) -> dict[str, Any]:
@@ -493,9 +508,33 @@ def build_report(
     comments = request_gitcode_comments(comments_url, os.getenv("GITCODE_TOKEN"))
     runs = extract_gate_runs(comments)
     if not runs:
-        raise RuntimeError("no OpenLiBing gate comment found in PR comments")
+        return empty_report(
+            mr_arg,
+            owner,
+            repo,
+            iid,
+            comments_url,
+            status="no_pipeline_comment_found",
+            message="No MindSpore-Bot OpenLiBing pipeline comment found in recent PR comments.",
+            recent_pipeline_comments=[],
+        )
 
-    run = select_run(runs, run_index)
+    run = select_latest_full_gate_run(runs)
+    if run is None:
+        return empty_report(
+            mr_arg,
+            owner,
+            repo,
+            iid,
+            comments_url,
+            status="no_full_gate_comment_found",
+            message=(
+                "No full PR-pipeline_Mindformers gate comment found in recent PR comments. "
+                "Codecheck-only pipeline comments are ignored."
+            ),
+            recent_pipeline_comments=summarize_recent_runs(runs),
+        )
+
     failed_stages = []
     fetched_failed_stage_logs: list[dict[str, Any]] = []
     for stage in run["stages"]:
@@ -529,9 +568,24 @@ def build_report(
         stages.append(stage_copy)
 
     unknown_stages = [stage for stage in stages if stage["status_kind"] == "unknown"]
-    all_passed = bool(stages) and all(stage["passed"] for stage in stages)
+    present_tasks = {stage["task"] for stage in stages}
+    missing_required_stages = [
+        task for task in REQUIRED_FULL_GATE_TASKS if task not in present_tasks
+    ]
+    status = "ok" if not missing_required_stages else "incomplete_full_gate_comment"
+    all_passed = (
+        status == "ok"
+        and bool(stages)
+        and all(stage["passed"] for stage in stages)
+    )
 
     return {
+        "status": status,
+        "message": (
+            "Latest full PR-pipeline_Mindformers gate comment selected."
+            if status == "ok"
+            else "A full gate pipeline comment was found but required stages are missing."
+        ),
         "mr": {
             "input": mr_arg,
             "owner": owner,
@@ -550,6 +604,7 @@ def build_report(
             "openlibing_params": run["pipeline_params"],
         },
         "all_passed": all_passed,
+        "missing_required_stages": missing_required_stages,
         "failed_stage_count": len(failed_stages),
         "unknown_stage_count": len(unknown_stages),
         "stages": stages,
@@ -558,12 +613,64 @@ def build_report(
     }
 
 
+def summarize_recent_runs(runs: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    return [
+        {
+            "comment_created_at": run["comment_created_at"],
+            "pipeline": run["pipeline"],
+            "tasks": [stage["task"] for stage in run.get("stages", [])],
+        }
+        for run in runs[:limit]
+    ]
+
+
+def empty_report(
+    mr_arg: str,
+    owner: str,
+    repo: str,
+    iid: str,
+    comments_url: str,
+    *,
+    status: str,
+    message: str,
+    recent_pipeline_comments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "message": message,
+        "mr": {
+            "input": mr_arg,
+            "owner": owner,
+            "repo": repo,
+            "iid": iid,
+            "api_comments_url": comments_url,
+        },
+        "comment": None,
+        "pipeline": None,
+        "all_passed": False,
+        "missing_required_stages": REQUIRED_FULL_GATE_TASKS,
+        "failed_stage_count": 0,
+        "unknown_stage_count": 0,
+        "stages": [],
+        "failed_stages": [],
+        "unknown_stages": [],
+        "recent_pipeline_comments": recent_pipeline_comments,
+    }
+
+
 def print_summary(report: dict[str, Any]) -> None:
     mr = report["mr"]
     print(f"MR: {mr['owner']}/{mr['repo']}#{mr['iid']}")
-    print(f"Comment: {report['comment']['created_at']}")
-    print(f"Pipeline: {report['pipeline']['name']}")
+    print(f"Status: {report['status']}")
+    print(f"Message: {report['message']}")
+    comment = report.get("comment")
+    pipeline = report.get("pipeline")
+    if comment and pipeline:
+        print(f"Comment: {comment['created_at']}")
+        print(f"Pipeline: {pipeline['name']}")
     print(f"All passed: {report['all_passed']}")
+    if report.get("missing_required_stages"):
+        print(f"Missing required stages: {', '.join(report['missing_required_stages'])}")
     print(f"Failed stages: {report['failed_stage_count']}")
     print(f"Unknown stages: {report['unknown_stage_count']}")
     print("")
@@ -605,7 +712,6 @@ def main() -> int:
     )
     parser.add_argument("mr", help="GitCode MR URL, or owner/repo#iid")
     parser.add_argument("--limit", type=int, default=500, help="OpenLiBing log tail page size")
-    parser.add_argument("--run-index", type=int, default=0, help="Gate comment index, latest is 0")
     parser.add_argument("--json", action="store_true", help="Print JSON report")
     parser.add_argument("--output", help="Write JSON report to this path")
     parser.add_argument("--summary", action="store_true", help="Print human summary")
@@ -625,7 +731,6 @@ def main() -> int:
     report = build_report(
         args.mr,
         limit=args.limit,
-        run_index=args.run_index,
         no_logs=args.no_logs,
         strict_log_fetch=args.strict_log_fetch,
     )
