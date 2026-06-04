@@ -1,6 +1,14 @@
 ---
 name: gitcode-pr-rfc-pipeline
-description: Drive the full GitCode contribution workflow via the GitCode REST API: draft PR/RFC bodies from repo templates, open or update pull requests, open RFC issues, link PRs and RFCs, trigger /retest, poll CI labels, and fetch failed MindSpore-Bot OpenLiBing gate logs headlessly via the bundled gitcode_pr_gate_log.py tool. Use when the user asks to 提PR, 提RFC, 关联 PR 和 RFC, 触发流水线, /retest, 看流水线过没过, 看门禁日志, 为什么 CI 挂了, or 拉取失败 stage 日志 on a gitcode.com repo such as mindspore/mindformers. Requires GITCODE_TOKEN for outward GitCode API actions.
+description: >-
+  Drive the full GitCode contribution workflow via the GitCode REST API:
+  draft PR/RFC bodies from repo templates, open or update pull requests, open
+  RFC issues, link PRs and RFCs, trigger /retest, poll CI labels, and fetch
+  failed MindSpore-Bot OpenLiBing gate logs headlessly via the bundled
+  gitcode_pr_gate_log.py tool. Use when the user asks to 提PR, 提RFC, 关联 PR 和
+  RFC, 触发流水线, /retest, 看流水线过没过, 看门禁日志, 为什么 CI 挂了, or 拉取失败
+  stage 日志 on a gitcode.com repo such as mindspore/mindformers. Requires
+  GITCODE_TOKEN for outward GitCode API actions.
 ---
 
 # GitCode PR / RFC / Pipeline
