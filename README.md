@@ -33,6 +33,7 @@ See the full agent list at <https://skills.sh>.
 | [`mindformers-pynative-training-run`](skills/mindformers-pynative-training-run/SKILL.md) | Launch / observe MindFormers pynative training. `msrun` command shapes, log + profile dir layout, background-run + Monitor pattern, the stale-`tail -F` gotcha, error-signature lookup. |
 | [`mindformers-pynative-perf-analysis`](skills/mindformers-pynative-perf-analysis/SKILL.md) | Read Ascend MindSpore profile data (`step_trace_time.csv`, `communication.json`, `trace_view.json`, `op_statistic.csv`) and turn it into an actionable next optimization. Bottleneck-classification decision tree included. |
 | [`gitcode-pr-rfc-pipeline`](skills/gitcode-pr-rfc-pipeline/SKILL.md) | Draft GitCode PR/RFC bodies, drive PR/RFC/link/retest/pipeline workflows, and export failed MindSpore-Bot stages with OpenLiBing log tails as JSON. |
+| [`gitcode-pr-inline-review`](skills/gitcode-pr-inline-review/SKILL.md) | Post line-anchored **inline** review comments on a GitCode PR over the API. Documents why the Gitee-style v5 API can't anchor lines (you must use the GitLab-style v4 `discussions` endpoint with a `position` object), how to anchor added vs deleted lines, and the delete-by-numeric-id gotcha. Bundled `gitcode_inline_comment.py` does post/batch/list/delete. |
 
 The two pynative skills are designed to stack: the **training-run** skill is the prerequisite for the
 **perf-analysis** skill (you can't analyze a profile you haven't run yet). Install both for
@@ -55,6 +56,11 @@ but the file-format specifics are Ascend-only.
 The `gitcode-pr-rfc-pipeline` skill assumes GitCode PR/MR comments from MindSpore-Bot and
 OpenLiBing pipeline detail links. Its bundled gate-log script can be used independently for
 JSON pass/fail inspection.
+
+The two GitCode skills complement each other: `gitcode-pr-rfc-pipeline` drives the PR/RFC/CI
+lifecycle, while `gitcode-pr-inline-review` delivers review findings as line-anchored inline
+comments. Both are repo-agnostic GitCode-API workflows (just `gitcode.com` + a token) and work
+outside MindFormers.
 
 ## Authoring / contributing
 
