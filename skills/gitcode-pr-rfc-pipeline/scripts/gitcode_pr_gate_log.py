@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch GitCode MindSpore-Bot gate status and failed OpenLiBing logs."""
+"""Fetch or watch GitCode MindSpore-Bot gate status and failed OpenLiBing logs."""
 
 from __future__ import annotations
 
@@ -7,7 +7,9 @@ import argparse
 import json
 import re
 import sys
+import time
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,9 @@ REQUIRED_FULL_GATE_TASKS = [
     "UT_Mindformers",
     "PR-pipeline_Mindformers",
 ]
+RUNNING_LABELS = {"ci-pipeline-running", "SC-RUNNING"}
+PASSED_LABELS = {"ci-pipeline-passed"}
+FAILED_LABELS = {"ci-pipeline-failed", "pr-ci-fail"}
 
 
 class GateCommentParser(HTMLParser):
@@ -338,6 +343,94 @@ def derived_aggregate_log(source_stages: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
+def label_names(labels: list[dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    for label in labels:
+        name = label.get("name") if isinstance(label, dict) else None
+        if name:
+            names.append(str(name))
+    return names
+
+
+def classify_labels(names: list[str]) -> str:
+    present = set(names)
+    if present & RUNNING_LABELS:
+        return "running"
+    if present & FAILED_LABELS:
+        return "failed"
+    if present & PASSED_LABELS:
+        return "passed"
+    return "pending"
+
+
+def parse_gitcode_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def report_comment_time(report: dict[str, Any]) -> datetime | None:
+    comment = report.get("comment") or {}
+    return parse_gitcode_time(comment.get("created_at"))
+
+
+def add_watch_metadata(
+    report: dict[str, Any],
+    *,
+    started_at: datetime,
+    elapsed_seconds: float,
+    iterations: int,
+    labels: list[str],
+    label_state: str,
+    saw_running: bool,
+    require_running: bool,
+    timed_out: bool,
+) -> dict[str, Any]:
+    report["watch"] = {
+        "enabled": True,
+        "started_at": started_at.isoformat(),
+        "elapsed_seconds": round(elapsed_seconds, 1),
+        "iterations": iterations,
+        "labels": labels,
+        "label_state": label_state,
+        "saw_running": saw_running,
+        "require_running": require_running,
+        "timed_out": timed_out,
+    }
+    return report
+
+
+def is_report_terminal_for_label_state(
+    report: dict[str, Any],
+    label_state: str,
+    *,
+    saw_running: bool,
+    first_running_at: datetime | None,
+) -> bool:
+    if saw_running and first_running_at is not None:
+        comment_time = report_comment_time(report)
+        if comment_time is None:
+            return False
+        if comment_time < first_running_at - timedelta(seconds=5):
+            return False
+
+    if label_state == "passed":
+        return report.get("status") == "ok" and bool(report.get("all_passed"))
+    if label_state == "failed":
+        return report.get("status") in {"ok", "incomplete_full_gate_comment"} and not bool(
+            report.get("all_passed")
+        )
+    return False
+
+
+def progress(message: str, enabled: bool) -> None:
+    if enabled:
+        print(message, file=sys.stderr, flush=True)
+
+
 def build_report(
     mr_arg: str,
     *,
@@ -460,6 +553,133 @@ def build_report(
     }
 
 
+def build_watch_report(
+    mr_arg: str,
+    *,
+    limit: int,
+    no_logs: bool,
+    strict_log_fetch: bool,
+    poll_interval: int,
+    watch_timeout: int,
+    require_running: bool,
+    watch_progress: bool,
+) -> dict[str, Any]:
+    owner, repo, iid = parse_mr(mr_arg)
+    client = GitCodeClient()
+    started_monotonic = time.monotonic()
+    started_at = datetime.now(timezone.utc)
+    first_running_at: datetime | None = None
+    saw_running = False
+    iterations = 0
+    last_labels: list[str] = []
+    last_label_state = "pending"
+    last_report: dict[str, Any] | None = None
+    deadline = started_monotonic + watch_timeout if watch_timeout > 0 else None
+
+    while True:
+        iterations += 1
+        labels, _headers = client.pull_labels(owner, repo, iid)
+        last_labels = label_names(labels)
+        last_label_state = classify_labels(last_labels)
+
+        if last_label_state == "running":
+            if not saw_running:
+                first_running_at = datetime.now(timezone.utc)
+            saw_running = True
+            progress(
+                f"watch: running labels={','.join(last_labels) or '(none)'}",
+                watch_progress,
+            )
+        elif last_label_state in {"passed", "failed"}:
+            if require_running and not saw_running:
+                progress(
+                    (
+                        "watch: terminal label seen before running; "
+                        f"waiting labels={','.join(last_labels) or '(none)'}"
+                    ),
+                    watch_progress,
+                )
+            else:
+                candidate = build_report(
+                    mr_arg,
+                    limit=limit,
+                    no_logs=True,
+                    strict_log_fetch=False,
+                )
+                last_report = candidate
+                if is_report_terminal_for_label_state(
+                    candidate,
+                    last_label_state,
+                    saw_running=saw_running,
+                    first_running_at=first_running_at,
+                ):
+                    final_report = (
+                        candidate
+                        if no_logs
+                        else build_report(
+                            mr_arg,
+                            limit=limit,
+                            no_logs=False,
+                            strict_log_fetch=strict_log_fetch,
+                        )
+                    )
+                    return add_watch_metadata(
+                        final_report,
+                        started_at=started_at,
+                        elapsed_seconds=time.monotonic() - started_monotonic,
+                        iterations=iterations,
+                        labels=last_labels,
+                        label_state=last_label_state,
+                        saw_running=saw_running,
+                        require_running=require_running,
+                        timed_out=False,
+                    )
+                progress(
+                    (
+                        "watch: terminal label seen but latest full gate comment is not "
+                        f"ready/matching yet; report_status={candidate.get('status')} "
+                        f"all_passed={candidate.get('all_passed')}"
+                    ),
+                    watch_progress,
+                )
+        else:
+            progress(
+                f"watch: pending labels={','.join(last_labels) or '(none)'}",
+                watch_progress,
+            )
+
+        now = time.monotonic()
+        if deadline is not None and now >= deadline:
+            if last_report is None:
+                last_report = build_report(
+                    mr_arg,
+                    limit=limit,
+                    no_logs=True,
+                    strict_log_fetch=False,
+                )
+            last_report["status"] = "watch_timeout"
+            last_report["message"] = (
+                "Timed out while watching PR labels for a terminal gate result."
+            )
+            last_report["all_passed"] = False
+            return add_watch_metadata(
+                last_report,
+                started_at=started_at,
+                elapsed_seconds=now - started_monotonic,
+                iterations=iterations,
+                labels=last_labels,
+                label_state=last_label_state,
+                saw_running=saw_running,
+                require_running=require_running,
+                timed_out=True,
+            )
+
+        sleep_for = poll_interval
+        if deadline is not None:
+            sleep_for = min(sleep_for, max(0.0, deadline - now))
+        time.sleep(sleep_for)
+
+
 def summarize_recent_runs(runs: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
     return [
         {
@@ -515,6 +735,15 @@ def print_summary(report: dict[str, Any]) -> None:
     if comment and pipeline:
         print(f"Comment: {comment['created_at']}")
         print(f"Pipeline: {pipeline['name']}")
+    watch = report.get("watch") or {}
+    if watch:
+        print(
+            "Watch: "
+            f"state={watch.get('label_state')} "
+            f"elapsed={watch.get('elapsed_seconds')}s "
+            f"iterations={watch.get('iterations')} "
+            f"timed_out={watch.get('timed_out')}"
+        )
     print(f"All passed: {report['all_passed']}")
     if report.get("missing_required_stages"):
         print(f"Missing required stages: {', '.join(report['missing_required_stages'])}")
@@ -562,6 +791,33 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="Print JSON report")
     parser.add_argument("--output", help="Write JSON report to this path")
     parser.add_argument("--summary", action="store_true", help="Print human summary")
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Poll PR labels until the gate reaches a terminal result, then fetch the final report",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=int,
+        default=90,
+        help="Seconds between label polls in --watch mode",
+    )
+    parser.add_argument(
+        "--watch-timeout",
+        type=int,
+        default=3600,
+        help="Maximum seconds to watch; use 0 for no timeout",
+    )
+    parser.add_argument(
+        "--require-running",
+        action="store_true",
+        help="In --watch mode, ignore existing terminal labels until a running label is observed",
+    )
+    parser.add_argument(
+        "--watch-progress",
+        action="store_true",
+        help="Print watch progress lines to stderr",
+    )
     parser.add_argument("--no-logs", action="store_true", help="Do not fetch failed-stage logs")
     parser.add_argument(
         "--strict-log-fetch",
@@ -574,13 +830,29 @@ def main() -> int:
         help="Exit with code 2 when any parsed gate stage failed",
     )
     args = parser.parse_args()
+    if args.poll_interval < 1:
+        parser.error("--poll-interval must be >= 1")
+    if args.watch_timeout < 0:
+        parser.error("--watch-timeout must be >= 0")
 
-    report = build_report(
-        args.mr,
-        limit=args.limit,
-        no_logs=args.no_logs,
-        strict_log_fetch=args.strict_log_fetch,
-    )
+    if args.watch:
+        report = build_watch_report(
+            args.mr,
+            limit=args.limit,
+            no_logs=args.no_logs,
+            strict_log_fetch=args.strict_log_fetch,
+            poll_interval=args.poll_interval,
+            watch_timeout=args.watch_timeout,
+            require_running=args.require_running,
+            watch_progress=args.watch_progress,
+        )
+    else:
+        report = build_report(
+            args.mr,
+            limit=args.limit,
+            no_logs=args.no_logs,
+            strict_log_fetch=args.strict_log_fetch,
+        )
 
     if args.output:
         output_path = Path(args.output)
@@ -592,6 +864,8 @@ def main() -> int:
     if args.summary:
         print_summary(report)
 
+    if report.get("status") == "watch_timeout":
+        return 3
     if args.fail_on_gate_fail and not report["all_passed"]:
         return 2
     return 0

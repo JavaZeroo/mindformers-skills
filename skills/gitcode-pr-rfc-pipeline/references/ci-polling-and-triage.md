@@ -31,56 +31,22 @@ usually only runs if earlier ones pass.
 labels=$(curl -s "https://api.gitcode.com/api/v5/repos/mindspore/mindformers/pulls/<PR>/labels?access_token=${GITCODE_TOKEN}" \
   | python -c "import sys,json;print(','.join(l['name'] for l in json.load(sys.stdin)))")
 ```
-**Don't block the session on a long `sleep` Bash call** — it freezes the conversation and a
-sleep past 300s busts the prompt cache. The pipeline takes ~10–30 min total, so poll
-asynchronously instead. Pick the mechanism that fits how the agent was invoked:
-- **Background poll (preferred for an interactive turn):** run a `run_in_background: true`
-  Bash loop that re-checks labels. The loop itself costs ~no tokens (just curl + compare);
-  **tokens are spent only when the loop EXITS and wakes the agent to speak** (each wake re-reads
-  the whole conversation). So the design question is *what should wake you* — pick by how much
-  visible progress the user wants:
-  - **Silent / terminal-only (cheapest, the default):** exit only on a terminal label. No
-    mid-run chatter; the instant CI passes or fails the loop exits and you report it. Frame it
-    to the user as "no news = still running" — a failure is never missed because the terminal
-    check itself fires the wake. One wake for the whole 10–30 min run.
-    ```bash
-    for i in $(seq 1 30); do
-      L=$(curl -s ".../pulls/<PR>/labels?access_token=${GITCODE_TOKEN}" \
-        | python -c "import sys,json;print(','.join(l['name'] for l in json.load(sys.stdin)))")
-      case ",$L," in
-        *,ci-pipeline-passed,*) echo "RESULT: PASS $L"; exit 0;;
-        *,ci-pipeline-failed,*|*,pr-ci-fail,*) echo "RESULT: FAIL $L"; exit 1;;
-      esac
-      sleep 90
-    done; echo "RESULT: TIMEOUT $L"
-    ```
-  - **Mixed heartbeat (only when the user explicitly wants periodic "still-alive" pings):** keep
-    checking the terminal label every ~90s — so a real failure still wakes you within ~90s, NOT
-    one heartbeat later — but if still RUNNING after K checks, emit a heartbeat line and exit; on
-    wake you report that one line and re-launch the next cycle. Choose K so the heartbeat period
-    stays **under the 300s prompt-cache TTL** (K=3 → ~4.5 min keeps context warm). **Do NOT
-    heartbeat every ~60s:** per-minute wakes re-read the full conversation and burn ~5× the
-    tokens of a ~5-min cadence for no extra signal — if the user asks for "every minute", push
-    back and offer ~5 min (or terminal-only).
-    ```bash
-    for i in 1 2 3; do                                   # K=3 → heartbeat ~every 4.5 min
-      L=$(curl -s ".../pulls/<PR>/labels?access_token=${GITCODE_TOKEN}" \
-        | python -c "import sys,json;print(','.join(l['name'] for l in json.load(sys.stdin)))")
-      case ",$L," in
-        *,ci-pipeline-passed,*) echo "RESULT: PASS $L"; exit 0;;
-        *,ci-pipeline-failed,*|*,pr-ci-fail,*) echo "RESULT: FAIL $L"; exit 1;;
-      esac
-      sleep 90
-    done; echo "STATE: RUNNING (heartbeat) $L"; exit 0    # RUNNING → report one line, re-launch
-    ```
-  Both variants anchor the match as `,$L,` against `,<label>,` so `pr-check-fail` (the advisory
-  micro-compass label, see below) never trips the FAIL case — a plain `*pr-ci-fail*` substring
-  match would. On wake, read the task output file, distinguish `RESULT:` (terminal → handle) from
-  `STATE: RUNNING` (heartbeat → report one line + re-launch the next cycle).
-- **`ScheduleWakeup` (for a `/loop` or self-paced turn):** re-check labels once per wake at
-  ~270s intervals — under the 300s cache TTL, so context stays warm; stop scheduling once a
-  terminal label appears.
-Either way: cap the rounds (~30), report the final label, never loop forever.
+**Don't make the model call the script repeatedly.** The pipeline takes ~10–30 min total, so
+start the bundled gate-log script in watch mode and let the process poll labels internally.
+It exits only after a terminal label appears and the matching full gate comment is available,
+then fetches failed OpenLiBing logs once:
+```bash
+: "${GITCODE_TOKEN:?token missing}"
+GATE=<path-to-this-skill>/scripts/gitcode_pr_gate_log.py
+python3 "$GATE" mindspore/mindformers#<PR> --watch --summary --output /tmp/gate-log.json \
+  | sed -E "s/${GITCODE_TOKEN}/<TOKEN>/g"
+```
+Use `--require-running` right after `/retest` or a new push if old `ci-pipeline-passed` /
+`ci-pipeline-failed` labels may still be present; it waits until a running label is observed
+before accepting a terminal result. Tune with `--poll-interval 90` and `--watch-timeout 3600`.
+Use `--watch-progress` only when terminal stderr progress is useful. For interactive agents,
+run this watch command in the background if available; no news means the process is still
+waiting. Avoid hand-written `sleep` loops except as a fallback when the script is unavailable.
 
 **On failure, find which stage AND fetch its log — use the bundled gate-log tool.** It selects
 the latest full `PR-pipeline_Mindformers` bot comment, ignores codecheck-only pipeline comments,
@@ -124,7 +90,8 @@ in the area you changed, a compile/import error from your diff. Many reds are NO
 infra/machine noise (`LC_ALL`/locale, k8s/docker slave, network/clone/`pip` timeouts, OpenLiBing
 5xx, a bare `exit code 123` with no rule violation), or a flaky/pre-existing test unrelated to
 your diff, or a stage that fails before reaching your code. For those, **do not touch the code —
-just re-post `/retest` once and re-poll**; a transient failure usually clears on the retry.
+just re-post `/retest` once and restart `--watch --require-running`**; a transient failure
+usually clears on the retry.
 Escalate to a real fix only when (a) the log clearly points at your diff, or (b) it fails the
 *same way a second time* after the retry. Don't burn retries indefinitely either — ~1 retry per
 distinct failure; if the same non-code failure persists, surface it to the user (likely a CI
@@ -169,7 +136,7 @@ pipeline; those require people.
   response payload.
 - **`scripts/gitcode_pr_gate_log.py`** (bundled): headless gate-log fetcher used for CI triage.
   Python 3.10+, stdlib-only, reads `GITCODE_TOKEN` from env, `--json`/`--summary`/`--no-logs`/
-  `--fail-on-gate-fail`/`--strict-log-fetch`. It reads the latest full gate state from the
-  MindSpore-Bot comment's hidden OpenLiBing links (not the rendered micro-frontend), so it
-  returns before the page would render. Prefer JSON output for automation; redact the token in
-  any echoed output.
+  `--watch`/`--require-running`/`--fail-on-gate-fail`/`--strict-log-fetch`. It reads the latest
+  full gate state from the MindSpore-Bot comment's hidden OpenLiBing links (not the rendered
+  micro-frontend), so it returns before the page would render. Prefer JSON output for automation;
+  redact the token in any echoed output.

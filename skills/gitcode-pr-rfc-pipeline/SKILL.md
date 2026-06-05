@@ -93,6 +93,7 @@ paths.
 ```bash
 python3 scripts/gitcode_pr_gate_log.py mindspore/mindformers#8310 --summary
 python3 scripts/gitcode_pr_gate_log.py https://gitcode.com/mindspore/mindformers/pull/8310 --json --output /tmp/gate-log.json
+python3 scripts/gitcode_pr_gate_log.py mindspore/mindformers#8310 --watch --summary
 ```
 
 The script:
@@ -119,6 +120,10 @@ Useful flags:
 - `--summary`: human-readable gate table.
 - `--json`: machine-readable report.
 - `--output <path>`: write JSON to a file.
+- `--watch`: monitor PR labels until the gate is terminal, then fetch the final report/logs.
+- `--require-running`: in `--watch` mode, ignore old terminal labels until a running label is
+  observed; use it right after `/retest` or a new push.
+- `--poll-interval <seconds>` / `--watch-timeout <seconds>`: tune monitoring cadence and cap.
 - `--no-logs`: parse stages only; skip OpenLiBing log fetches.
 - `--fail-on-gate-fail`: exit non-zero when the full gate is failed or incomplete.
 - `--strict-log-fetch`: fail if OpenLiBing logs cannot be fetched.
