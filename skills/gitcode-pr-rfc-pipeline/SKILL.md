@@ -28,6 +28,10 @@ posting `/retest`. These actions target shared upstream repos.
 - **Create/update PR, search issue candidates, create issue/RFC, or link PR ↔ issue/RFC**:
   read
   [gitcode-api-cookbook.md](references/gitcode-api-cookbook.md).
+- **PR shows mergeable=false / conflict after master moved ahead, or after a force-push**:
+  read the "Step 4 — Check mergeability & resolve conflicts" section of
+  [gitcode-api-cookbook.md](references/gitcode-api-cookbook.md) (rebase, read both sides,
+  `git merge-tree` preview, force-push + re-check).
 - **Trigger `/retest`, poll CI, or inspect failed gate logs**: use the gate-log script first,
   then read [ci-polling-and-triage.md](references/ci-polling-and-triage.md) when you need
   polling, retry, or failure-triage details.

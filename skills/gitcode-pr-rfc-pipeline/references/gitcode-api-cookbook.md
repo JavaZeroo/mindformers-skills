@@ -281,3 +281,50 @@ for the reverse direction. Ordinary bug/doc/test issues do not require that reve
 field.
 
 ---
+
+## Step 4 — Check mergeability & resolve conflicts
+
+A green gate is not enough: if upstream `master` moved ahead, the PR can be **mergeable=false**
+even with all CI passed. Check this before declaring the PR done, and re-check after every
+force-push.
+
+Read the PR's merge state from the API (`mergeable` / `mergeable_state`; GitCode also exposes
+`mergeable_state.conflict_passed`):
+```bash
+curl -s "https://api.gitcode.com/api/v5/repos/mindspore/mindformers/pulls/<PR>?access_token=${GITCODE_TOKEN}" \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print("mergeable=",d.get("mergeable"),"state=",d.get("mergeable_state"))' \
+  | sed -E "s/${GITCODE_TOKEN}/<TOKEN>/g"
+```
+- `mergeable=true` / `conflict_passed=true`: no conflict — nothing to do.
+- `mergeable=false` / conflict reported: the branch needs a rebase onto current `master`.
+
+**Resolve flow (rebase, preserving the single-commit shape):**
+
+1. Preview the conflict without touching the working tree — `git merge-tree` shows which files
+   and hunks collide:
+   ```bash
+   git fetch origin master
+   git merge-tree $(git merge-base HEAD origin/master) HEAD origin/master | grep -A3 -i "changed in both\|<<<<<<<" | head -40
+   ```
+2. Rebase onto upstream master:
+   ```bash
+   git fetch origin master && git rebase origin/master
+   ```
+3. For each conflicted file: **read BOTH sides fully** before resolving — `git show :2:<file>`
+   (ours / the PR branch) and `git show :3:<file>` (theirs / master). Do not blindly keep one
+   side; master may have refactored an API your change depends on (e.g. a config-driven filter,
+   a renamed method). Keep your change's intent while adopting master's new mechanism.
+4. `git add <file>` then continue non-interactively:
+   ```bash
+   GIT_EDITOR=true git rebase --continue
+   ```
+5. Force-push the rebased branch (outward action — **confirm first**), then `/retest` and
+   re-poll the gate (Step 6 / ci-polling-and-triage.md):
+   ```bash
+   git push <fork-remote> <branch> --force-with-lease
+   ```
+
+After force-push, re-read `mergeable` once more to confirm `conflict_passed` flipped to true;
+CI labels can lag, so verify the merge state explicitly rather than assuming the rebase fixed it.
+
+---
