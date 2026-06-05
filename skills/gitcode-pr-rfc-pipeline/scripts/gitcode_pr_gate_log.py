@@ -351,7 +351,7 @@ def build_report(
         owner,
         repo,
         iid,
-        {"per_page": "100", "direction": "desc"},
+        {"per_page": "100", "direction": "desc", "comment_type": "pr_comment"},
     )
     runs = extract_gate_runs(comments)
     if not runs:

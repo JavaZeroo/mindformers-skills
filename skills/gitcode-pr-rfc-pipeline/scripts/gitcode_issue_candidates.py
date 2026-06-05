@@ -227,6 +227,7 @@ def unique_requests(
 
 def compact_issue(issue: dict[str, Any], score: int, reasons: list[str]) -> dict[str, Any]:
     return {
+        "id": issue.get("id"),
         "number": str(issue.get("number") or ""),
         "title": issue.get("title") or "",
         "state": issue.get("state") or "",

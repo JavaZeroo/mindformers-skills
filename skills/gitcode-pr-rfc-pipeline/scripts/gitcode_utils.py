@@ -99,7 +99,7 @@ def request_json_response(
     url: str,
     *,
     method: str = "GET",
-    body: dict[str, Any] | None = None,
+    body: Any | None = None,
     headers: dict[str, str] | None = None,
     timeout: int = 45,
     user_agent: str = DEFAULT_USER_AGENT,
@@ -158,7 +158,7 @@ def request_json(
     url: str,
     *,
     method: str = "GET",
-    body: dict[str, Any] | None = None,
+    body: Any | None = None,
     headers: dict[str, str] | None = None,
     timeout: int = 45,
     user_agent: str = DEFAULT_USER_AGENT,
@@ -178,7 +178,7 @@ def curl_json(
     url: str,
     *,
     method: str,
-    body: dict[str, Any] | None,
+    body: Any | None,
     headers: dict[str, str],
     timeout: int,
 ) -> Any:
@@ -266,6 +266,25 @@ class GitCodeClient:
             user_agent=self.user_agent,
         )
 
+    def post_json(
+        self,
+        path: str,
+        body: Any,
+        params: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[Any, dict[str, str]]:
+        request_headers = self.auth_headers()
+        if headers:
+            request_headers.update(headers)
+        return request_json_response(
+            self.url(path, params),
+            method="POST",
+            body=body,
+            headers=request_headers,
+            timeout=self.timeout,
+            user_agent=self.user_agent,
+        )
+
     def repo_issues(
         self,
         owner: str,
@@ -278,6 +297,39 @@ class GitCodeClient:
         if isinstance(data, dict) and isinstance(data.get("items"), list):
             return data["items"], headers
         raise RuntimeError(f"unexpected GitCode issue response shape: {type(data).__name__}")
+
+    def pull_labels(
+        self,
+        owner: str,
+        repo: str,
+        iid: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        data, headers = self.get_json(f"/repos/{owner}/{repo}/pulls/{iid}/labels")
+        if not isinstance(data, list):
+            raise RuntimeError("GitCode PR labels response is not a list")
+        return data, headers
+
+    def pull_linked_issues(
+        self,
+        owner: str,
+        repo: str,
+        iid: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        data, headers = self.get_json(f"/repos/{owner}/{repo}/pulls/{iid}/issues")
+        if not isinstance(data, list):
+            raise RuntimeError("GitCode linked issues response is not a list")
+        return data, headers
+
+    def link_pull_issues(
+        self,
+        owner: str,
+        repo: str,
+        iid: str,
+        issue_ids: list[int],
+    ) -> tuple[Any, dict[str, str]]:
+        if not issue_ids:
+            raise ValueError("issue_ids must not be empty")
+        return self.post_json(f"/repos/{owner}/{repo}/pulls/{iid}/issues", issue_ids)
 
     def pull_comments(
         self,

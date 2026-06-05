@@ -60,6 +60,13 @@ If the task spans multiple areas, use them in this order:
 For concrete API commands and token checks, read
 [gitcode-api-cookbook.md](references/gitcode-api-cookbook.md).
 
+## Runtime
+
+- Run bundled scripts with Python 3.10+.
+- Scripts use only the Python standard library; do not install pip packages for them.
+- Resolve script paths relative to this `SKILL.md`, not to a specific agent's install path.
+- Pass tokens through environment variables such as `GITCODE_TOKEN`, never as script args.
+
 ## Issue Candidate Script
 
 Use `scripts/gitcode_issue_candidates.py` before creating a new issue or RFC. It is

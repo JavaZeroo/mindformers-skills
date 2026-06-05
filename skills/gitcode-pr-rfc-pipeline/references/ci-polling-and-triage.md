@@ -17,16 +17,19 @@ manually browse or paginate comments; use the bundled gate-log script below when
 latest full gate state. If it reports `no_full_gate_comment_found` shortly after `/retest`,
 wait 60–90 seconds and retry `/retest` at most a few times.
 
-**Pipeline stages** (all must pass for the `ci-pipeline-passed` label): Antipoison →
-**CodeCheck_Pylint** → SCA → **UT_Mindformers**. A later stage only runs if earlier ones pass.
+**Required full-gate rows** (all must pass for the `ci-pipeline-passed` label and
+`all_passed:true`): `Antipoison_Mindformers`, `CodeCheck_Pylint`, `SCA_Mindformers`,
+`UT_Mindformers`, and the aggregate `PR-pipeline_Mindformers` row. The aggregate row has no
+`jobRunId`/`stepRunId`; read failed child task logs for the real cause. A later execution task
+usually only runs if earlier ones pass.
 
-**Status lives in the PR LABELS** (no checks endpoint). Poll `GET pulls/<PR>` labels:
+**Status lives in the PR LABELS** (no checks endpoint). Poll `GET pulls/<PR>/labels`:
 - running: `ci-pipeline-running`, `SC-RUNNING`; mid-run `SC-SUCC` = static-check stage passed
 - ✅ pass: `ci-pipeline-passed`
 - ❌ fail: `ci-pipeline-failed` / `pr-ci-fail`
 ```bash
-labels=$(curl -s "https://api.gitcode.com/api/v5/repos/mindspore/mindformers/pulls/<PR>?access_token=${GITCODE_TOKEN}" \
-  | python -c "import sys,json;print(','.join(l['name'] for l in json.load(sys.stdin).get('labels',[])))")
+labels=$(curl -s "https://api.gitcode.com/api/v5/repos/mindspore/mindformers/pulls/<PR>/labels?access_token=${GITCODE_TOKEN}" \
+  | python -c "import sys,json;print(','.join(l['name'] for l in json.load(sys.stdin)))")
 ```
 **Don't block the session on a long `sleep` Bash call** — it freezes the conversation and a
 sleep past 300s busts the prompt cache. The pipeline takes ~10–30 min total, so poll
@@ -42,8 +45,8 @@ asynchronously instead. Pick the mechanism that fits how the agent was invoked:
     check itself fires the wake. One wake for the whole 10–30 min run.
     ```bash
     for i in $(seq 1 30); do
-      L=$(curl -s ".../pulls/<PR>?access_token=${GITCODE_TOKEN}" \
-        | python -c "import sys,json;print(','.join(l['name'] for l in json.load(sys.stdin).get('labels',[])))")
+      L=$(curl -s ".../pulls/<PR>/labels?access_token=${GITCODE_TOKEN}" \
+        | python -c "import sys,json;print(','.join(l['name'] for l in json.load(sys.stdin)))")
       case ",$L," in
         *,ci-pipeline-passed,*) echo "RESULT: PASS $L"; exit 0;;
         *,ci-pipeline-failed,*|*,pr-ci-fail,*) echo "RESULT: FAIL $L"; exit 1;;
@@ -61,8 +64,8 @@ asynchronously instead. Pick the mechanism that fits how the agent was invoked:
     back and offer ~5 min (or terminal-only).
     ```bash
     for i in 1 2 3; do                                   # K=3 → heartbeat ~every 4.5 min
-      L=$(curl -s ".../pulls/<PR>?access_token=${GITCODE_TOKEN}" \
-        | python -c "import sys,json;print(','.join(l['name'] for l in json.load(sys.stdin).get('labels',[])))")
+      L=$(curl -s ".../pulls/<PR>/labels?access_token=${GITCODE_TOKEN}" \
+        | python -c "import sys,json;print(','.join(l['name'] for l in json.load(sys.stdin)))")
       case ",$L," in
         *,ci-pipeline-passed,*) echo "RESULT: PASS $L"; exit 0;;
         *,ci-pipeline-failed,*|*,pr-ci-fail,*) echo "RESULT: FAIL $L"; exit 1;;
@@ -83,9 +86,10 @@ Either way: cap the rounds (~30), report the final label, never loop forever.
 the latest full `PR-pipeline_Mindformers` bot comment, ignores codecheck-only pipeline comments,
 parses the hidden OpenLiBing links (`projectId`/`pipelineId`/`pipelineRunId`/`jobRunId`/
 `stepRunId`), and fetches failed-stage logs **directly from the OpenLiBing gateway APIs**.
-No browser scrape, no asking the user to paste logs. Stdlib only; reads `GITCODE_TOKEN` from
-the env (never pass the token as an arg). Resolve the script relative to the loaded `SKILL.md`;
-do not hard-code a Claude, Codex, Cursor, or OpenCode install path:
+No browser scrape, no asking the user to paste logs. Python 3.10+, stdlib only, no pip
+install; reads `GITCODE_TOKEN` from the env (never pass the token as an arg). Resolve the script
+relative to the loaded `SKILL.md`; do not hard-code a Claude, Codex, Cursor, or OpenCode install
+path:
 ```bash
 : "${GITCODE_TOKEN:?token missing}"
 GATE=<path-to-this-skill>/scripts/gitcode_pr_gate_log.py
@@ -163,8 +167,8 @@ pipeline; those require people.
 - **PATCH responses don't reliably echo `number`/`head`** (they can come back null) — to confirm
   a PATCH (body / state / link) actually took, re-`GET` the resource; don't trust the PATCH
   response payload.
-- **`scripts/gitcode_pr_gate_log.py`** (bundled): headless gate-log fetcher used in Step 4.
-  Stdlib-only, reads `GITCODE_TOKEN` from env, `--json`/`--summary`/`--no-logs`/
+- **`scripts/gitcode_pr_gate_log.py`** (bundled): headless gate-log fetcher used for CI triage.
+  Python 3.10+, stdlib-only, reads `GITCODE_TOKEN` from env, `--json`/`--summary`/`--no-logs`/
   `--fail-on-gate-fail`/`--strict-log-fetch`. It reads the latest full gate state from the
   MindSpore-Bot comment's hidden OpenLiBing links (not the rendered micro-frontend), so it
   returns before the page would render. Prefer JSON output for automation; redact the token in

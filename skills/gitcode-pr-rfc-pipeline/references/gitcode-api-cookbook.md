@@ -36,6 +36,10 @@ it from the environment first — just ask. Two ways to take it in:
 - **Write to a file you read** (survives across Bash calls): `!printf %s '<tok>' > /tmp/gc_token`
   then `GITCODE_TOKEN=$(cat /tmp/gc_token)` in each outward command.
 
+  The leading `!` is an agent UI convention for "ask the user to run this in their local
+  shell"; it is not part of the shell command. If your agent UI does not support bang commands,
+  ask the user to run the command without `!`.
+
 Each Bash tool call is a fresh shell that **sources `~/.bashrc`**; a token the user merely
 `export`s interactively does NOT reach it, and a value the CLI was launched with can be lost
 across a session/context boundary. So `~/.bashrc` is the only *persistent* auto-source — but
@@ -257,16 +261,44 @@ you fill it via the PATCH above.)
 
 ## Step 3 — Link PR ↔ issue/RFC
 
-Put `Fixes #<n>` + the issue URL into the PR's "关联 Issue" section. Same-repo `#<n>` (PR
-and issue both upstream) creates the association and auto-closes the issue on merge. Fetch
-the PR body, replace the `待关联` placeholder, PATCH it back:
+Use the official PR linked-issues endpoint first, then keep `Fixes #<n>` in the PR body for
+auto-close behavior and human readability. The official endpoint wants the issue's internal
+`id`, not the visible issue `number`; `scripts/gitcode_issue_candidates.py` includes `id` in
+candidate JSON. If you only have `#<n>`, resolve it first:
+```bash
+python - <<'PY'
+import json, os, urllib.request
+tok=os.environ["GITCODE_TOKEN"]; issue="<n>"
+url=f"https://api.gitcode.com/api/v5/repos/mindspore/mindformers/issues/{issue}?access_token={tok}"
+d=json.load(urllib.request.urlopen(url))
+issue_id=d.get("id")
+if issue_id is None: raise SystemExit("issue id missing")
+json.dump([int(issue_id)], open("/tmp/pr_issue_link.json","w"), ensure_ascii=False)
+print("issue_id:", issue_id)
+PY
+```
+
+Associate the PR to the issue, then verify with `GET /pulls/<PR>/issues`:
+```bash
+curl -s -X POST "https://api.gitcode.com/api/v5/repos/mindspore/mindformers/pulls/<PR>/issues" \
+  -H "Authorization: Bearer ${GITCODE_TOKEN}" -H "Content-Type: application/json" \
+  --data-binary @/tmp/pr_issue_link.json | sed -E "s/${GITCODE_TOKEN}/<TOKEN>/g"
+
+curl -s "https://api.gitcode.com/api/v5/repos/mindspore/mindformers/pulls/<PR>/issues?access_token=${GITCODE_TOKEN}" \
+  | python -c "import sys,json;print([i.get('number') for i in json.load(sys.stdin)])"
+```
+
+Now put `Fixes #<n>` + the issue URL into the PR's "关联 Issue" section. Same-repo `#<n>`
+(PR and issue both upstream) auto-closes the issue on merge. Fetch the PR body, replace the
+`待关联` placeholder, PATCH it back:
 ```bash
 python - <<'PY'
 import json,urllib.request,os,sys
 tok=os.environ["GITCODE_TOKEN"]; base="https://api.gitcode.com/api/v5/repos/mindspore/mindformers/pulls/<PR>"
+issue="<n>"
 b=json.load(urllib.request.urlopen(base+"?access_token="+tok)).get("body") or ""
-link="Fixes #<n>\nhttps://gitcode.com/mindspore/mindformers/issues/<n>"
-if "Fixes #<n>" in b: sys.exit("already linked — nothing to do")
+link=f"Fixes #{issue}\nhttps://gitcode.com/mindspore/mindformers/issues/{issue}"
+if f"Fixes #{issue}" in b: sys.exit("already linked in PR body — nothing to do")
 ph=next((p for p in ("待关联",) if p in b), None)            # known placeholder(s) the draft may use
 new=b.replace(ph, link, 1) if ph else b.rstrip()+"\n\n"+link  # fallback: append — NEVER a silent no-op
 if new==b: sys.exit("link was a no-op — inspect the body and insert it manually under 关联 Issue")
