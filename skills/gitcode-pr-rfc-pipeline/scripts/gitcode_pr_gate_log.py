@@ -265,27 +265,94 @@ def has_exec_log_params(stage: dict[str, Any]) -> bool:
     return bool(params.get("jobRunId") and params.get("stepRunId"))
 
 
-def fetch_stage_log(stage: dict[str, Any], limit: int) -> dict[str, Any]:
-    params = stage.get("params") or {}
-    endpoint = OPENLIBING_EXEC_LOG
-    endpoint_name = "exec-log"
-    response = request_json(
-        endpoint,
+# The exec-log endpoint rejects limit >= 10000 ("Limit must be greater than 0
+# and less than 10000"); clamp each page below that.
+LOG_PAGE_HARD_CAP = 9999
+# Safety cap on pages so a runaway/huge log can't loop forever (each page is a
+# ~50KB window, so this bounds a single stage fetch to a few MB).
+LOG_MAX_PAGES = 120
+
+
+def _exec_log_page(
+    params: dict[str, str], limit: int, end_offset: int, referer: str | None
+) -> dict[str, Any]:
+    """Fetch one forward page of the exec-log.
+
+    The endpoint is offset-paged. Paging FORWARD uses ``sort="asc"`` with the
+    previous page's ``end_offset`` fed back as the ``endOffset`` cursor (the
+    ``startOffset`` field does NOT seek and returns empty if set). The first
+    page uses cursor 0.
+    """
+    body = log_payload(params, include_exec_ids=True, limit=limit)
+    body["sort"] = "asc"
+    body["startOffset"] = 0
+    body["endOffset"] = end_offset
+    return request_json(
+        OPENLIBING_EXEC_LOG,
         method="POST",
-        body=log_payload(params, include_exec_ids=True, limit=limit),
-        headers=openlibing_headers(stage.get("detail_url")),
+        body=body,
+        headers=openlibing_headers(referer),
         user_agent=OPENLIBING_BROWSER_USER_AGENT,
     )
-    data = response.get("data") or {}
-    log_text = data.get("log") or ""
+
+
+def fetch_stage_log(stage: dict[str, Any], limit: int) -> dict[str, Any]:
+    """Fetch a failed step's FULL log by paging the OpenLiBing exec-log endpoint.
+
+    A single call only returns one ~50KB window (the tail with ``sort="desc"``,
+    or the head with ``sort="asc"``), so a failure in the MIDDLE of a large
+    multi-card log would be missed. This pages forward from offset 0 until
+    ``has_more`` is false (or the page cap is hit), concatenates the windows,
+    and runs the error-excerpt heuristic over the whole log.
+    """
+    params = stage.get("params") or {}
+    endpoint_name = "exec-log"
+    page_limit = min(limit, LOG_PAGE_HARD_CAP)
+    referer = stage.get("detail_url")
+
+    chunks: list[str] = []
+    cursor = 0
+    pages = 0
+    truncated = False
+    seen_cursors: set[int] = set()
+    last_response: dict[str, Any] = {}
+    while True:
+        response = _exec_log_page(params, page_limit, cursor, referer)
+        last_response = response
+        data = response.get("data") or {}
+        chunk = data.get("log") or ""
+        if chunk:
+            chunks.append(chunk)
+        pages += 1
+
+        end_offset = data.get("end_offset")
+        if not data.get("has_more") or end_offset is None:
+            break
+        try:
+            nxt = int(end_offset)
+        except (TypeError, ValueError):
+            break
+        if nxt <= cursor or nxt in seen_cursors:
+            break  # cursor not advancing -> stop rather than loop forever
+        seen_cursors.add(nxt)
+        cursor = nxt
+        if pages >= LOG_MAX_PAGES:
+            truncated = True
+            break
+
+    log_text = "\n".join(chunks)
+    data = last_response.get("data") or {}
     return {
         "endpoint": endpoint_name,
-        "url": endpoint,
-        "code": response.get("code"),
-        "msg": response.get("msg"),
-        "has_more": data.get("has_more"),
-        "start_offset": data.get("start_offset"),
+        "url": OPENLIBING_EXEC_LOG,
+        "code": last_response.get("code"),
+        "msg": last_response.get("msg"),
+        # has_more now means "more remained beyond the page cap" (truncated);
+        # a fully-paged log reports False.
+        "has_more": truncated,
+        "start_offset": 0,
         "end_offset": data.get("end_offset"),
+        "pages_fetched": pages,
         "text": log_text,
         "error_excerpt": extract_error_excerpt(log_text),
         "excerpt_is_heuristic": True,
@@ -787,7 +854,12 @@ def main() -> int:
         description="Check GitCode MindSpore-Bot PR gate status and fetch failed logs."
     )
     parser.add_argument("mr", help="GitCode MR URL, or owner/repo#iid")
-    parser.add_argument("--limit", type=int, default=500, help="OpenLiBing log tail page size")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="OpenLiBing exec-log per-page size (the log is paged in full; clamped below 10000)",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON report")
     parser.add_argument("--output", help="Write JSON report to this path")
     parser.add_argument("--summary", action="store_true", help="Print human summary")
