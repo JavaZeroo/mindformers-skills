@@ -1,155 +1,70 @@
 ---
 name: gitcode-pr-rfc-pipeline
 description: >-
-  Drive the full GitCode contribution workflow via the GitCode REST API:
-  draft PR/issue/RFC bodies from repo templates, open or update pull requests,
-  search candidate issues before creating one, open ordinary or RFC issues,
-  link PRs to issues/RFCs, trigger /retest, poll CI labels, and fetch
-  failed MindSpore-Bot OpenLiBing gate logs headlessly via the bundled
-  gitcode_pr_gate_log.py tool. Use when the user asks to 提PR, 提issue/RFC,
-  关联 PR 和 issue/RFC, 触发流水线, /retest, 看流水线过没过, 看门禁日志,
-  为什么 CI 挂了, or 拉取失败 stage 日志 on a gitcode.com repo such as
-  mindspore/mindformers. Requires GITCODE_TOKEN for outward GitCode API actions.
+  The end-to-end GitCode contribution playbook: draft a PR/issue/RFC body from repo
+  templates, search candidate issues before creating one, open or update the pull
+  request, open/link an ordinary or RFC issue, keep it mergeable, trigger the CI gate,
+  read the result, and work the review comments to green. This is the process layer —
+  it sequences and gives judgment, and delegates every actual API/gate/comment operation
+  to the gitcode-api-gate skill. Use when the user asks to 提PR, 提issue/RFC, 关联 PR 和
+  issue/RFC, 走 PR 流程, 把 PR 推到合入, 处理检视意见, or 看 CI 过没过 on a gitcode.com repo
+  such as mindspore/mindformers. Requires GITCODE_TOKEN (consumed by gitcode-api-gate).
 ---
 
-# GitCode PR / RFC / Pipeline
+# GitCode PR / issue / RFC contribution playbook
 
-Drive a GitCode contribution flow headlessly: draft PR/issue/RFC text, create or update
-PRs, search/link existing issues, create ordinary or RFC issues when needed, trigger
-`/retest`, check the latest full MindSpore-Bot gate, and fetch failed-stage OpenLiBing
-logs without opening the browser UI.
+Drive a GitCode contribution from first draft to a green, merge-ready PR. This skill owns the
+**order and the judgment**; the **operations** (search/open/link, retest, read gate, post/reply
+to review comments) all live in the [`gitcode-api-gate`](../gitcode-api-gate/SKILL.md) skill —
+read it for the exact API calls and bundled scripts, and run everything through it.
 
-**Confirm every outward action** before pushing, creating PRs/issues, patching bodies, or
-posting `/retest`. These actions target shared upstream repos.
+**Confirm every outward action** with the user before it fires — pushing, creating PRs/issues,
+patching bodies, posting `/retest`, replying to or resolving review comments. These hit shared
+upstream repos.
 
-## Quick Decision Tree
+## The flow
 
-- **Draft PR/issue/RFC body only**: read [body-drafting.md](references/body-drafting.md).
-- **Create/update PR, search issue candidates, create issue/RFC, or link PR ↔ issue/RFC**:
-  read
-  [gitcode-api-cookbook.md](references/gitcode-api-cookbook.md).
-- **PR shows mergeable=false / conflict after master moved ahead, or after a force-push**:
-  read the "Step 4 — Check mergeability & resolve conflicts" section of
-  [gitcode-api-cookbook.md](references/gitcode-api-cookbook.md) (rebase, read both sides,
-  `git merge-tree` preview, force-push + re-check).
-- **Trigger `/retest`, poll CI, or inspect failed gate logs**: use the gate-log script first,
-  then read [ci-polling-and-triage.md](references/ci-polling-and-triage.md) when you need
-  polling, retry, or failure-triage details.
+1. **Draft the body.** Write the PR (and, if needed, issue/RFC) text from the repository's
+   templates — see [references/body-drafting.md](references/body-drafting.md). Get the user's OK
+   on the text before anything is posted.
+2. **Confirm the target.** Repo, base branch, fork, change type, PR number (new vs update), and
+   that `GITCODE_TOKEN` resolves to the right account (the api-gate cookbook has the check).
+3. **Search before creating an issue/RFC.** Run `gitcode-api-gate`'s `gitcode_issue_candidates.py`
+   and let the user pick: link an existing issue, create an ordinary issue, create an RFC, or
+   search again. Don't default bugfix/CI work to an RFC.
+4. **Open / update / link.** Create or update the PR, open the issue/RFC if planned, and link
+   PR ↔ issue/RFC — via `gitcode-api-gate` (its `gitcode-api-cookbook.md`, Steps 1–3).
+5. **Keep it mergeable.** If the PR goes `mergeable=false` (master moved, or after a force-push),
+   resolve it per the cookbook's Step 4 (rebase, read both sides, `git merge-tree` preview,
+   force-push, re-check) — through `gitcode-api-gate`.
+6. **Trigger the gate.** Post `/retest` through `gitcode-api-gate`; confirm it took (a new
+   `ci-pipeline-running` label or a fresh full pipeline comment) rather than assuming.
+7. **Read the gate.** Use `gitcode-api-gate`'s `gitcode_pr_gate_log.py` (`--watch
+   --require-running` right after a retest) to get the latest full gate, and on failure the
+   failed stages' logs — before touching code.
+8. **Work the review.** Pull the diff, read the review comments, and reply to / resolve each one
+   (or fix code and answer) via `gitcode-api-gate`'s `gitcode_inline_comment.py`. Repeat 6–8 until
+   green and every thread is addressed.
 
-If the task spans multiple areas, use them in this order:
+## Judgment that lives here (not in the mechanism layer)
 
-1. Draft body text from repository templates.
-2. Confirm target repo, branch, fork, change type, and token ownership.
-3. Before creating any issue/RFC, search candidate issues with
-   `scripts/gitcode_issue_candidates.py` and let the user choose.
-4. Push/create/update/link through the GitCode API.
-5. Trigger `/retest`.
-6. Check the latest full gate with `scripts/gitcode_pr_gate_log.py`.
-7. If failed, inspect `failed_stages[].log.error_excerpt` first, then confirm with
-   `failed_stages[].log.text` before changing code.
-
-## Token Rules
-
-- Use `GITCODE_TOKEN` from the environment for GitCode API actions.
-- Do not write tokens into skill files, repository files, command arguments, git config, or
-  final answers.
-- Redact token-bearing command output before showing it to the user.
-- If the token is missing or resolves to the wrong account, stop and ask the user to set it
-  through their local shell or agent secret mechanism.
-
-For concrete API commands and token checks, read
-[gitcode-api-cookbook.md](references/gitcode-api-cookbook.md).
-
-## Runtime
-
-- Run bundled scripts with Python 3.10+.
-- Scripts use only the Python standard library; do not install pip packages for them.
-- Resolve script paths relative to this `SKILL.md`, not to a specific agent's install path.
-- Pass tokens through environment variables such as `GITCODE_TOKEN`, never as script args.
-
-## Issue Candidate Script
-
-Use `scripts/gitcode_issue_candidates.py` before creating a new issue or RFC. It is
-read-only and can run without a token for public repositories; if `GITCODE_TOKEN` is set,
-it uses it for authenticated reads.
-
-```bash
-python3 scripts/gitcode_issue_candidates.py mindspore/mindformers \
-  --change-type bugfix --title "<draft PR title>" --keywords Muon optimizer tp --json
-```
-
-The script returns `status`, `candidates[]`, `score`, `reasons`, and `next_action`.
-Show the top candidates to the user and ask whether to link one, create an ordinary
-issue, create an RFC issue, or search again. For bugfix/regression/CI-fix work, do not
-default to RFC; create an ordinary bug issue only after the user confirms no existing
-candidate fits.
-
-## Gate Log Script
-
-Use `scripts/gitcode_pr_gate_log.py` for gate status and failed logs. Resolve the script
-relative to this `SKILL.md`; do not hard-code Claude, Codex, Cursor, or OpenCode install
-paths.
-
-```bash
-python3 scripts/gitcode_pr_gate_log.py mindspore/mindformers#8310 --summary
-python3 scripts/gitcode_pr_gate_log.py https://gitcode.com/mindspore/mindformers/pull/8310 --json --output /tmp/gate-log.json
-python3 scripts/gitcode_pr_gate_log.py mindspore/mindformers#8310 --watch --summary
-```
-
-The script:
-
-- selects the latest full `PR-pipeline_Mindformers` bot comment;
-- ignores codecheck-only pipeline comments;
-- requires the full gate stages `Antipoison_Mindformers`, `CodeCheck_Pylint`,
-  `SCA_Mindformers`, `UT_Mindformers`, and `PR-pipeline_Mindformers`;
-- returns `status`, `message`, `all_passed`, `missing_required_stages`, `stages`, and
-  `failed_stages`;
-- fetches failed task logs directly from OpenLiBing gateway APIs when `--no-logs` is not set.
-  In JSON, `failed_stages[].log.text` is the raw log source of truth;
-  `failed_stages[].log.error_excerpt` is only a heuristic convenience summary.
-
-Important statuses:
-
-- `status: "ok"`: latest full gate comment was selected.
-- `status: "no_full_gate_comment_found"`: no full gate comment was found in recent comments;
-  do not treat this as pass.
-- `all_passed: true`: every required full-gate row was explicitly recognized as passed.
-
-Useful flags:
-
-- `--summary`: human-readable gate table.
-- `--json`: machine-readable report.
-- `--output <path>`: write JSON to a file.
-- `--watch`: monitor PR labels until the gate is terminal, then fetch the final report/logs.
-- `--require-running`: in `--watch` mode, ignore old terminal labels until a running label is
-  observed; use it right after `/retest` or a new push.
-- `--poll-interval <seconds>` / `--watch-timeout <seconds>`: tune monitoring cadence and cap.
-- `--no-logs`: parse stages only; skip OpenLiBing log fetches.
-- `--fail-on-gate-fail`: exit non-zero when the full gate is failed or incomplete.
-- `--strict-log-fetch`: fail if OpenLiBing logs cannot be fetched.
-
-## Failure Triage
-
-A red gate is not always caused by the current code change. Before editing code:
-
-- Start with `failed_stages[].log.error_excerpt`, but treat it as heuristic. If it is empty,
-  generic, or suspicious, read `failed_stages[].log.text`; use the raw log as the final
-  source of truth.
-- Fix only when the log points to this change: touched-file lint, relevant UT, import/compile
-  error from the diff.
-- For infra-like failures, flaky unrelated tests, or missing full gate comments shortly after
-  `/retest`, retry once and re-check.
-
-For detailed polling and triage guidance, read
-[ci-polling-and-triage.md](references/ci-polling-and-triage.md).
+- **Search before you create.** An existing issue/RFC is almost always better than a new one;
+  only create after the candidate search comes back empty and the user agrees.
+- **A red gate is not always your change.** Start with `error_excerpt` but treat it as a hint —
+  read the raw `log.text` as the source of truth. Fix only when the log points to *this* diff
+  (touched-file lint, a relevant UT, an import/compile error). For infra-like failures, flaky
+  unrelated tests, or a missing full-gate comment shortly after `/retest`, retest once and
+  re-check rather than editing.
+- **Don't over-post.** One clear `/retest` and wait; the pipeline takes ~10–30 min. Re-reading
+  the gate is cheap, re-triggering it is noisy.
+- **Answer every thread.** A review isn't done when the code is fixed — reply to each comment
+  saying what changed (and where), then resolve it, so the reviewer can scan what's left.
+- **Keep bodies honest.** Reproduce the template faithfully, check the real boxes, no invented
+  results, concise inline test evidence — details in
+  [references/body-drafting.md](references/body-drafting.md).
 
 ## Repository Assumptions
 
-The concrete commands in the references are field-tested against `mindspore/mindformers`:
-
-- upstream: `mindspore/mindformers`
-- base branch: `master`
-- fork shape: `<login>/mindformers`
-- GitCode API base: `https://api.gitcode.com/api/v5`
-
-Adapt owner, repo, fork, and base branch when the user targets another GitCode repository.
+Field-tested against `mindspore/mindformers` (upstream `mindspore/mindformers`, base `master`,
+fork `<login>/mindformers`). Adapt for other GitCode repositories; the mechanism layer carries
+the concrete API base and command shapes.

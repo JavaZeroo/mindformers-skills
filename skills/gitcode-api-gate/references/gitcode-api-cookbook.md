@@ -155,7 +155,8 @@ curl -s -X PATCH "https://api.gitcode.com/api/v5/repos/mindspore/mindformers/pul
 ```
 Body: reproduce `.gitcode/PULL_REQUEST_TEMPLATE.md` faithfully (keep the `<!-- -->` lines and
 ALL checklist options; just check the right boxes), no local paths, concise inline test
-evidence, honest checkboxes. Use the PR/issue/RFC body drafting section above.
+evidence, honest checkboxes. Draft the body per the `gitcode-pr-rfc-pipeline` skill's
+`references/body-drafting.md`.
 
 **1e. Verify:** `GET pulls/<NUMBER>` → confirm `head` sha == local HEAD, `base` == master,
 `state` open. Report number + `html_url`.
@@ -228,8 +229,8 @@ unclear, create without labels and add labels later / in the web UI.
 
 ### 2c. Create an RFC issue when needed
 
-Draft the RFC body from `.gitcode/ISSUE_TEMPLATE/RFC-CN.yml` using the PR/issue/RFC body drafting
-section above (title prefix `[RFC] `; sections 基本信息 / 概述 / 用例分析 / 方案设计 /
+Draft the RFC body from `.gitcode/ISSUE_TEMPLATE/RFC-CN.yml` using the `gitcode-pr-rfc-pipeline`
+skill's `references/body-drafting.md` (title prefix `[RFC] `; sections 基本信息 / 概述 / 用例分析 / 方案设计 /
 测试设计 / 缺点与风险 / 现有技术 / 未解决问题; put `!<pr>` in "相关 Issue/PR" for the
 reverse link).
 
@@ -351,7 +352,7 @@ curl -s "https://api.gitcode.com/api/v5/repos/mindspore/mindformers/pulls/<PR>?a
    GIT_EDITOR=true git rebase --continue
    ```
 5. Force-push the rebased branch (outward action — **confirm first**), then `/retest` and
-   re-poll the gate (Step 6 / ci-polling-and-triage.md):
+   re-poll the gate (see ci-gate.md):
    ```bash
    git push <fork-remote> <branch> --force-with-lease
    ```

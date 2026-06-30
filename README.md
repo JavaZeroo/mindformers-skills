@@ -13,9 +13,10 @@ read `step_trace_time.csv`.
 # Install all skills globally for one agent, for example Claude Code
 npx skills@latest add JavaZeroo/mindformers-skills -g -a claude-code
 
-# Install this GitCode PR/RFC/pipeline workflow skill only
+# Install the GitCode workflow — the pipeline (process) delegates to api-gate (mechanism),
+# so install both; or install gitcode-api-gate alone for ad-hoc API/gate/comment operations
 npx skills@latest add JavaZeroo/mindformers-skills \
-  --skill gitcode-pr-rfc-pipeline -g -a claude-code
+  --skill gitcode-pr-rfc-pipeline --skill gitcode-api-gate -g -a claude-code
 
 # List available skills without installing
 npx skills@latest add JavaZeroo/mindformers-skills --list
@@ -32,11 +33,14 @@ See the full agent list at <https://skills.sh>.
 |---|---|
 | [`mindformers-pynative-training-run`](skills/mindformers-pynative-training-run/SKILL.md) | Launch / observe MindFormers pynative training. `msrun` command shapes, log + profile dir layout, background-run + Monitor pattern, the stale-`tail -F` gotcha, error-signature lookup. |
 | [`mindformers-pynative-perf-analysis`](skills/mindformers-pynative-perf-analysis/SKILL.md) | Read Ascend MindSpore profile data (`step_trace_time.csv`, `communication.json`, `trace_view.json`, `op_statistic.csv`) and turn it into an actionable next optimization. Bottleneck-classification decision tree included. |
-| [`gitcode-pr-rfc-pipeline`](skills/gitcode-pr-rfc-pipeline/SKILL.md) | Draft GitCode PR/RFC bodies, drive PR/RFC/link/retest/pipeline workflows, and export failed MindSpore-Bot stages with OpenLiBing log tails as JSON. |
+| [`gitcode-api-gate`](skills/gitcode-api-gate/SKILL.md) | Operate a GitCode repo + CI gate over the REST API: search issue candidates, open/update PRs, open/link issues/RFCs, check mergeability, `/retest`, poll labels (`--watch`), export failed MindSpore-Bot stages with OpenLiBing log tails as JSON, and read/post/reply/resolve PR review comments (inline or general). The mechanism layer. |
+| [`gitcode-pr-rfc-pipeline`](skills/gitcode-pr-rfc-pipeline/SKILL.md) | The end-to-end contribution playbook: draft body → search/open/link issue → keep mergeable → trigger and read the gate → work the review to green. Sequences and judges; delegates every operation to `gitcode-api-gate`. |
 
 The two pynative skills are designed to stack: the **training-run** skill is the prerequisite for the
 **perf-analysis** skill (you can't analyze a profile you haven't run yet). Install both for
-a full pynative-perf-optimization workflow.
+a full pynative-perf-optimization workflow. The two GitCode skills stack the same way:
+**gitcode-pr-rfc-pipeline** (process) depends on **gitcode-api-gate** (mechanism) — install both
+for the full PR workflow, or just **gitcode-api-gate** for ad-hoc API/gate/comment operations.
 
 ## Scope
 
@@ -52,9 +56,10 @@ If you're on a different stack (PyTorch/CUDA, graph mode, single-card debug only
 skills will still be useful for the generic "background-run + read worker log" patterns
 but the file-format specifics are Ascend-only.
 
-The `gitcode-pr-rfc-pipeline` skill assumes GitCode PR/MR comments from MindSpore-Bot and
+The `gitcode-api-gate` skill assumes GitCode PR/MR comments from MindSpore-Bot and
 OpenLiBing pipeline detail links. Its bundled gate-log script can be used independently for
-JSON pass/fail inspection.
+JSON pass/fail inspection, and its inline-comment script for posting/replying to review
+comments. `gitcode-pr-rfc-pipeline` is the workflow on top of it.
 
 ## Authoring / contributing
 
