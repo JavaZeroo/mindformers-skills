@@ -1,14 +1,13 @@
 ---
 name: gitcode-pr-rfc-pipeline
 description: >-
-  The end-to-end GitCode contribution playbook: draft a PR/issue/RFC body from repo
-  templates, search candidate issues before creating one, open or update the pull
-  request, open/link an ordinary or RFC issue, keep it mergeable, trigger the CI gate,
-  read the result, and work the review comments to green. This is the process layer —
-  it sequences and gives judgment, and delegates every actual API/gate/comment operation
-  to the gitcode-api-gate skill. Use when the user asks to 提PR, 提issue/RFC, 关联 PR 和
-  issue/RFC, 走 PR 流程, 把 PR 推到合入, 处理检视意见, or 看 CI 过没过 on a gitcode.com repo
-  such as mindspore/mindformers. Requires GITCODE_TOKEN (consumed by gitcode-api-gate).
+  End-to-end GitCode (gitcode.com) contribution playbook: draft the PR/issue/RFC body
+  from repo templates, search before creating an issue, open and link it, keep the PR
+  mergeable, drive the CI gate to green, and work the review comments. Supplies the
+  order and the judgment; every actual API call goes through gitcode-api-gate. Use when
+  the user asks to 提PR, 提issue/RFC, 关联 PR 和 issue/RFC, 走 PR 流程, 把 PR 推到合入,
+  处理检视意见, or 看 CI 过没过 — on a repo such as mindspore/mindformers.
+  Needs GITCODE_TOKEN.
 ---
 
 # GitCode PR / issue / RFC contribution playbook

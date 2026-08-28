@@ -1,20 +1,14 @@
 ---
 name: gitcode-api-gate
 description: >-
-  Operate a GitCode repo and its CI gate over the REST API, headlessly: open or
-  update pull requests, search candidate issues, open ordinary/RFC issues, link
-  PR ↔ issue/RFC, check mergeability, trigger /retest, poll the pipeline labels,
-  fetch failed MindSpore-Bot OpenLiBing gate-stage logs, and read / post / answer
-  PR review comments (inline line-anchored or general). Bundles
-  gitcode_pr_actions.py (whoami/status/ensure-pr/set-body/create-issue/link-issue/retest/
-  merge-state/auto-submit), gitcode_issue_candidates.py, gitcode_pr_gate_log.py (status +
-  failed logs + --watch), gitcode_review_comments.py (threads/answer/delete), and the shared
-  gitcode_utils.py. This is the mechanism layer — for the end-to-end contribution playbook
-  (draft body → open PR → link → retest → handle review) use the gitcode-pr-rfc-pipeline
-  skill, which calls into this one. Use when the user asks to 操作 GitCode, 建/改 PR, 提issue,
-  搜候选 issue, 关联, 检查能否合入, 触发流水线, /retest, 看流水线过没过, 看门禁日志, 为什么
-  CI 挂了, 拉取失败 stage 日志, or 拉取/回复/resolve 检视意见 on a gitcode.com repo such as
-  mindspore/mindformers. Requires GITCODE_TOKEN for outward actions.
+  Mechanism layer for GitCode (gitcode.com): drive the REST API and the CI gate
+  headlessly — open/update a PR, search and open issues/RFCs, link PR ↔ issue,
+  check mergeability, /retest, poll gate labels, fetch failed MindSpore-Bot
+  gate-stage logs, and read/answer/resolve review comments. Use for a single such
+  operation: 看门禁日志, 为什么 CI 挂了, 拉取失败 stage 日志, 触发流水线, /retest,
+  建/改 PR, 搜候选 issue, 关联, 检查能否合入, 拉取/回复/resolve 检视意见 — on a repo
+  such as mindspore/mindformers. For a whole contribution start to finish use
+  gitcode-pr-rfc-pipeline, which drives this skill. Needs GITCODE_TOKEN.
 ---
 
 # GitCode API & gate operations
@@ -37,6 +31,18 @@ repos under the token's account and notify people.
 | Open/update a PR, open an ordinary/RFC issue, link PR ↔ issue/RFC, check mergeability | `scripts/gitcode_pr_actions.py` (idempotent, `--dry-run`, re-GET verified); raw-API fallback in [references/gitcode-api-cookbook.md](references/gitcode-api-cookbook.md) (Steps 1–4) |
 | Trigger `/retest`, poll CI labels, inspect failed gate logs | `scripts/gitcode_pr_gate_log.py` + [references/ci-gate.md](references/ci-gate.md) |
 | Read / post / answer review comments (inline or general) | `scripts/gitcode_review_comments.py` + [references/review-comments.md](references/review-comments.md) |
+
+All scripts: Python 3.10+, stdlib only, `--help` for full flags, token only via
+`GITCODE_TOKEN` (never printed), every mutating subcommand takes `--dry-run` and
+verifies itself by re-GET. They share `gitcode_utils.py` (HTTP/token/repo parsing),
+which is internal — never invoked directly.
+
+- `gitcode_pr_actions.py` — `whoami` · `status` · `ensure-pr` · `set-body` ·
+  `create-issue` · `link-issue` · `retest` · `merge-state` · `auto-submit`
+- `gitcode_review_comments.py` — `threads` · `answer` · `resolve` · `delete`
+- `gitcode_issue_candidates.py` — read-only candidate search (no subcommands)
+- `gitcode_pr_gate_log.py` — gate status + failed logs; `--watch`, `--summary`,
+  `--output` (no subcommands)
 
 ## Token Rules
 
