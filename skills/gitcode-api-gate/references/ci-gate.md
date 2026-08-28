@@ -70,9 +70,18 @@ full-gate row is explicitly a pass), and `failed_stages[]`, each with `log.text`
 tail, source of truth), `log.error_excerpt` (heuristic lines matching common failure
 patterns), and `log.excerpt_is_heuristic: true`. Start with the excerpt, then verify against
 `log.text` before reporting a root cause or changing code. Notes:
-- `status:"ok"` means a full `PR-pipeline_Mindformers` gate comment was selected.
-- `status:"no_full_gate_comment_found"` means recent comments only contain non-full pipelines
-  (for example codecheck-only) or no full gate has been posted yet; do not treat this as pass.
+- **Decode `status` before anything else — only `ok` is a verdict:**
+
+  | `status` | means | do |
+  |---|---|---|
+  | `ok` | a full `PR-pipeline_Mindformers` gate comment was parsed | read `all_passed` / `failed_stages` |
+  | `incomplete_full_gate_comment` | gate comment found, a required stage missing | still running; re-poll |
+  | `no_pipeline_comment_found` | no MindSpore-Bot pipeline comment at all | CI never started — `/retest` |
+  | `no_full_gate_comment_found` | only codecheck-style comments so far | wait 60–90 s after `/retest`, retry |
+  | `watch_timeout` | `--watch` hit `--watch-timeout` | re-run; raise the timeout |
+
+  Only `status:"ok"` + `all_passed:true` is green. A missing or incomplete status is
+  **never** a pass.
 - Aggregate `pipeline` rows carry no `jobRunId`/`stepRunId`; their log is
   `derived-from-failed-stage-logs` — read the failed *child task* rows for the real cause.
 - `--fail-on-gate-fail` exits non-zero on any failed or incomplete full gate; `--strict-log-fetch`

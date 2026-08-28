@@ -34,6 +34,9 @@ upstream repos.
    search again. Don't default bugfix/CI work to an RFC.
 4. **Open / update / link.** Create or update the PR, open the issue/RFC if planned, and link
    PR ↔ issue/RFC — via `gitcode-api-gate` (its `gitcode-api-cookbook.md`, Steps 1–3).
+   The API link and the body `Fixes #<N>` line are **independent**: `status` can report
+   `body_contains_fixes: true` while `linked_issues` is still `[]`. The merge gate wants
+   the API link, so trust `linked_issues`.
 5. **Keep it mergeable.** If the PR goes `mergeable=false` (master moved, or after a force-push),
    resolve it per the cookbook's Step 4 (rebase, read both sides, `git merge-tree` preview,
    force-push, re-check) — through `gitcode-api-gate`.
@@ -42,9 +45,11 @@ upstream repos.
 7. **Read the gate.** Use `gitcode-api-gate`'s `gitcode_pr_gate_log.py` (`--watch
    --require-running` right after a retest) to get the latest full gate, and on failure the
    failed stages' logs — before touching code.
-8. **Work the review.** Pull the diff, read the review comments, and reply to / resolve each one
-   (or fix code and answer) via `gitcode-api-gate`'s `gitcode_inline_comment.py`. Repeat 6–8 until
-   green and every thread is addressed.
+8. **Work the review.** Read the FULL threads (`gitcode-api-gate`'s
+   `gitcode_review_comments.py threads` — it expands `reply[]` and hides bot threads), then
+   fix code and/or `answer` each human thread. Repeat 6–8 until green and every thread is
+   addressed, then `resolve` each. Note: the API cannot nest replies — `answer` posts a
+   top-level comment quoting the thread; resolve works via the discussion hash.
 
 ## Judgment that lives here (not in the mechanism layer)
 
@@ -57,8 +62,10 @@ upstream repos.
   re-check rather than editing.
 - **Don't over-post.** One clear `/retest` and wait; the pipeline takes ~10–30 min. Re-reading
   the gate is cheap, re-triggering it is noisy.
-- **Answer every thread.** A review isn't done when the code is fixed — reply to each comment
-  saying what changed (and where), then resolve it, so the reviewer can scan what's left.
+- **Answer every human thread.** A review isn't done when the code is fixed — answer each
+  comment saying what changed (and where), so the reviewer can scan what's left. Bot threads
+  (`atomgit-bot` AI-review placeholders, `MindSpore-Bot` CLA/gate notices) are not review
+  feedback: never answer them, and never resolve them.
 - **Keep bodies honest.** Reproduce the template faithfully, check the real boxes, no invented
   results, concise inline test evidence — details in
   [references/body-drafting.md](references/body-drafting.md).

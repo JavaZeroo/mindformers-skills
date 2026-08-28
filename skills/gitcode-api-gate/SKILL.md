@@ -4,10 +4,11 @@ description: >-
   Operate a GitCode repo and its CI gate over the REST API, headlessly: open or
   update pull requests, search candidate issues, open ordinary/RFC issues, link
   PR ↔ issue/RFC, check mergeability, trigger /retest, poll the pipeline labels,
-  fetch failed MindSpore-Bot OpenLiBing gate-stage logs, and read / post / reply-to /
-  resolve PR review comments (inline line-anchored or general). Bundles
-  gitcode_issue_candidates.py, gitcode_pr_gate_log.py (status + failed logs + --watch),
-  gitcode_inline_comment.py (post/batch/list/delete/threads/reply/resolve), and the shared
+  fetch failed MindSpore-Bot OpenLiBing gate-stage logs, and read / post / answer
+  PR review comments (inline line-anchored or general). Bundles
+  gitcode_pr_actions.py (whoami/status/ensure-pr/set-body/create-issue/link-issue/retest/
+  merge-state/auto-submit), gitcode_issue_candidates.py, gitcode_pr_gate_log.py (status +
+  failed logs + --watch), gitcode_review_comments.py (threads/answer/delete), and the shared
   gitcode_utils.py. This is the mechanism layer — for the end-to-end contribution playbook
   (draft body → open PR → link → retest → handle review) use the gitcode-pr-rfc-pipeline
   skill, which calls into this one. Use when the user asks to 操作 GitCode, 建/改 PR, 提issue,
@@ -33,9 +34,9 @@ repos under the token's account and notify people.
 | Operation | Use |
 |---|---|
 | Search candidate issues before creating one | `scripts/gitcode_issue_candidates.py` (read-only) |
-| Open/update a PR, open an ordinary/RFC issue, link PR ↔ issue/RFC, check mergeability | [references/gitcode-api-cookbook.md](references/gitcode-api-cookbook.md) (Steps 1–4) |
+| Open/update a PR, open an ordinary/RFC issue, link PR ↔ issue/RFC, check mergeability | `scripts/gitcode_pr_actions.py` (idempotent, `--dry-run`, re-GET verified); raw-API fallback in [references/gitcode-api-cookbook.md](references/gitcode-api-cookbook.md) (Steps 1–4) |
 | Trigger `/retest`, poll CI labels, inspect failed gate logs | `scripts/gitcode_pr_gate_log.py` + [references/ci-gate.md](references/ci-gate.md) |
-| Read / post / reply-to / resolve review comments (inline or general) | `scripts/gitcode_inline_comment.py` + [references/inline-review.md](references/inline-review.md) |
+| Read / post / answer review comments (inline or general) | `scripts/gitcode_review_comments.py` + [references/review-comments.md](references/review-comments.md) |
 
 ## Token Rules
 
@@ -91,14 +92,28 @@ python3 scripts/gitcode_pr_gate_log.py https://gitcode.com/mindspore/mindformers
 
 See [references/ci-gate.md](references/ci-gate.md) for polling/retry/triage detail.
 
-## The two-API gotcha (read before commenting)
+## v5 only — the v4 API is write-disabled (re-verified 2026-08-25)
 
-GitCode serves a Gitee-style **v5** API (`/api/v5`, `?access_token=`) and a GitLab-style **v4**
-API (`/api/v4`, `PRIVATE-TOKEN:` header) on the same host. General PR comments, `list`, and
-`delete` are v5; **inline (line-anchored) comments and reply/resolve are v4 `discussions`**. The
-v5 comment endpoint silently drops `position` and posts a *general* comment — a `201` that looks
-like success but isn't anchored. The inline script handles this; see
-[references/inline-review.md](references/inline-review.md).
+GitCode serves a Gitee-style **v5** API and a GitLab-style **v4** API on the same host, and
+older versions of this skill routed inline comments and replies through v4. **v4 writes now
+return 403** (`当前 /api/v4 接口已禁用，请使用官方文档中的 /api/v5 接口`) with both `Bearer`
+and `PRIVATE-TOKEN`. v4 reads still answer 200 but must not be built on.
+
+Everything is v5 now, and v5 gained what v4 was needed for:
+
+- `GET /pulls/{pr}/comments?comment_type=diff_comment` returns each review thread with a
+  `reply[]` array and a `resolved` flag — the old "v5 hides threaded replies" trap is fixed.
+  The *unfiltered* list is still lossy, so always pass `comment_type`.
+- `POST /pulls/{pr}/comments` with `path` + `position` creates a genuine anchored
+  `diff_comment` — the old "v5 silently drops position" claim is obsolete.
+- **Nesting a reply is impossible**: `discussion_id` / `in_reply_to_id` / `comment_id` are
+  silently ignored and create a new top-level comment. `answer` quotes the thread instead.
+- **Resolve works**: `PUT /pulls/{pr}/comments/{discussion_hash}` `{"resolved":true}`. Note the
+  id-type trap — that path takes the discussion **hash**, while `/pulls/comments/{numeric id}`
+  (no `{pr}`) is a different endpoint for GET/PATCH/DELETE. The old skill used the latter for
+  resolve and got a 405 that made it look impossible.
+
+Detail and the verified endpoint map: [references/review-comments.md](references/review-comments.md).
 
 ## Repository Assumptions
 
